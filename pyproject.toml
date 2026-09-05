@@ -1,7 +1,7 @@
 [project]
 name = "master-thesis-ewi-2026"
 version = "0.1.0"
-description = "Multivariate Generation of Synthetic Electricity and Heatload Profuviles for Residential Builddings Using Diffusion Modells"
+description = "Multivariate Generation of Synthetic Electricity and Heatload Profiles for Residential Buildings Using Diffusion Modells"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
