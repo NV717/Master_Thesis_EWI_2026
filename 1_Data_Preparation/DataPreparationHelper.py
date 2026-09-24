@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import ast
 import numpy as np
-from tqdm import tqdm
+import tqdm.auto as tqdm
 import matplotlib.pyplot as plt
 RESULTS_DIR = r"DataPreparation\Generation\Generation"
 test_path = r"Generation/Generation/run_000013.h5"
@@ -160,13 +160,35 @@ def comp_manifests(planned_manifest: pd.DataFrame, realised_manifest: pd.DataFra
     print(f"Missing Cols: {len(missing_cols)}")
     print(f"{missing_cols.index}")
 
+    planned_cols_with_missing = planned_manifest[
+        planned_manifest["seed"].isin(realised_manifest["state_seed"])
+    ].copy()
+
+    planned_cols_with_missing = (
+        planned_cols_with_missing
+        .sort_values("seed")
+        .reset_index(drop=True)
+    )
+
+    realised_manifest = (
+        realised_manifest
+        .sort_values("state_seed")
+        .reset_index(drop=True)
+    )
+
+    assert len(planned_cols_with_missing) == len(realised_manifest)
+
+    assert (
+            planned_cols_with_missing["seed"].to_numpy()
+            == realised_manifest["state_seed"].to_numpy()
+    ).all()
+
+    assert (
+            planned_cols_with_missing["climateRegion"].to_numpy()
+            == realised_manifest["resolved_climateRegion"].to_numpy()
+    ).all()
 
 
-    planned_cols_with_missing = planned_manifest[real_missing]
-    #check if manifest values got changed in the generation
-
-    assert (planned_cols_with_missing["seed"] == realised_manifest["state_seed"]).all()
-    assert (planned_cols_with_missing["climateRegion"] == realised_manifest["resolved_climateRegion"]).all()
     realised_manifest_bench = realised_manifest.drop(columns=["weatherFilepath", "weatherID", "resolved_climateRegion","resolved_latitude","resolved_longitude","state_seed","apartment_seeds","maxLoadViolation_kW","runtime_seconds"])
     assert len(realised_manifest_bench) == len(planned_cols_with_missing)
     realised_manifest_bench["run_id"] = planned_cols_with_missing["run_id"].to_numpy()
