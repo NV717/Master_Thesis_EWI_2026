@@ -1,0 +1,39 @@
+{
+  "os":  "Windows-11-10.0.26200-SP0",
+  "python":  "CPython 3.13.14",
+  "startedAt":  "2026-09-23T15:09:30.308254Z",
+  "program":  "7_Diff_Models/diffusion1D.ipynb",
+  "codePath":  "7_Diff_Models/diffusion1D.ipynb",
+  "git":  {
+    "remote":  "git@github.com:NV717/Master_Thesis_EWI_2026.git",
+    "commit":  "62280fb2c1ceabd29e7744bfa928b60b7aa5cf1f"
+  },
+  "email":  "samuel.siller@alumni.fh-aachen.de",
+  "root":  "C:\\Users\\Samuel\\FH_Aachen\\MasterThesis\\Master_Thesis_EWI_2026\\7_Diff_Models",
+  "host":  "DESKTOP-AAJR41F",
+  "executable":  "C:\\Users\\Samuel\\FH_Aachen\\MasterThesis\\Master_Thesis_EWI_2026\\.venv\\Scripts\\python.exe",
+  "cpu_count":  10,
+  "cpu_count_logical":  20,
+  "gpu":  "NVIDIA GeForce RTX 3080",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1999298785280",
+      "used":  "1918988779520"
+    }
+  },
+  "memory":  {
+    "total":  "68628615168"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3080",
+      "memoryTotal":  "10737418240",
+      "cudaCores":  8704,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-613f04be-66c8-f2f7-c8b3-801847119d02"
+    }
+  ],
+  "cudaVersion":  "13.3",
+  "writerId":  "26f5f7njh9v5me40delzvas1wipx0e5r"
+}

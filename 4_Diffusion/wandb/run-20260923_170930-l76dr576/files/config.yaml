@@ -1,0 +1,62 @@
+_wandb:
+    value:
+        cli_version: 0.30.0
+        e:
+            26f5f7njh9v5me40delzvas1wipx0e5r:
+                codePath: 7_Diff_Models/diffusion1D.ipynb
+                cpu_count: 10
+                cpu_count_logical: 20
+                cudaVersion: "13.3"
+                disk:
+                    /:
+                        total: "1999298785280"
+                        used: "1918988779520"
+                email: samuel.siller@alumni.fh-aachen.de
+                executable: C:\Users\Samuel\FH_Aachen\MasterThesis\Master_Thesis_EWI_2026\.venv\Scripts\python.exe
+                git:
+                    commit: 62280fb2c1ceabd29e7744bfa928b60b7aa5cf1f
+                    remote: git@github.com:NV717/Master_Thesis_EWI_2026.git
+                gpu: NVIDIA GeForce RTX 3080
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 8704
+                      memoryTotal: "10737418240"
+                      name: NVIDIA GeForce RTX 3080
+                      uuid: GPU-613f04be-66c8-f2f7-c8b3-801847119d02
+                host: DESKTOP-AAJR41F
+                memory:
+                    total: "68628615168"
+                os: Windows-11-10.0.26200-SP0
+                program: 7_Diff_Models/diffusion1D.ipynb
+                python: CPython 3.13.14
+                root: C:\Users\Samuel\FH_Aachen\MasterThesis\Master_Thesis_EWI_2026\7_Diff_Models
+                startedAt: "2026-09-23T15:09:30.308254Z"
+                writerId: 26f5f7njh9v5me40delzvas1wipx0e5r
+        m: []
+        python_version: 3.13.14
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 2
+                - 16
+            "4": 3.13.14
+            "5": 0.30.0
+            "8":
+                - 1
+                - 3
+            "12": 0.30.0
+            "13": windows-amd64
+epochs:
+    value: 2
+learning_rate:
+    value: 0.0001
+loss_type:
+    value: huber
+schedule:
+    value: sigmoid_beta
+timesteps:
+    value: 300
