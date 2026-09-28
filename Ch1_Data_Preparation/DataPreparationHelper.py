@@ -640,3 +640,30 @@ def compare_distributions(buildings, train_idx, val_idx, test_idx, cols):
             stat, p = ks_2samp(orig, df[col])
             print(f"  {name}: statistic={stat:.4f}, p={p:.4f}")
         print()
+
+
+def save_stats(path, res, cols, mean, std):
+    path = Path(path)
+    np.savez(path, columns=np.array(cols), resolution=str(res),mean=mean.squeeze(1).cpu().numpy(),std=std.squeeze(1).cpu().numpy())
+
+def load_stats(path):
+    path = Path(path)
+    data = np.load(path)
+    cols = data["columns"].tolist()
+    mean = data["mean"]
+    std = data["std"]
+
+    stats = {
+        col: {
+            "mean": float(mean[i]),
+            "std": float(std[i]),
+        }
+        for i, col in enumerate(cols)
+    }
+
+    return stats
+
+def select_stats(stats, columns):
+    mean = torch.tensor([stats[col]["mean"] for col in columns], dtype=torch.float32).unsqueeze(1)
+    std = torch.tensor([stats[col]["std"] for col in columns],dtype=torch.float32).unsqueeze(1)
+    return mean, std
