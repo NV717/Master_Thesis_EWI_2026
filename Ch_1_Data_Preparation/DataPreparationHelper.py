@@ -319,7 +319,7 @@ def check_duplicate_timeseries(manifest):
 # ddataset
 from torch.utils.data import IterableDataset, get_worker_info
 class h5Dataset(IterableDataset):
-    def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_mean,target_std,condition_mean,condition_std,static_by_run_id,resolution=None,shufflefiles=False,shufflewindows=True, buffer_size=0):
+    def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_mean,target_std,condition_mean,condition_std,static_by_run_id,aggregation,resolution=None,shufflefiles=False,shufflewindows=True, buffer_size=0):
         super().__init__()
         self.files = list(files)
         self.run_ids = list(rund_ids)
@@ -337,6 +337,7 @@ class h5Dataset(IterableDataset):
         self.shufflefiles = shufflefiles
         self.shufflewindows = shufflewindows
         self.buffer_size = buffer_size
+        self.aggregation = aggregation
 
         if len(self.files) != len(self.run_ids):
             raise ValueError("input doesnt have same length")
@@ -351,7 +352,8 @@ class h5Dataset(IterableDataset):
         ts = pd.read_hdf(path, key="timeseries", columns=self.all_cols)
 
         if self.resolution is not None:
-            ts = ts.resample(self.resolution).mean()
+            agg= {col: self.aggregation[col] for col in self.all_cols}
+            ts = ts.resample(self.resolution).agg(agg)
 
         target = ts[self.gen_cols].to_numpy(dtype=np.float32, copy=False).T
         condition = ts[self.cond_cols].to_numpy(dtype=np.float32, copy=False).T
@@ -373,9 +375,12 @@ class h5Dataset(IterableDataset):
         for path, run_id in items:
             target, condition = self._read_series(path)
 
+            # z-score normalisierung
             target = (target-self.target_mean) / (self.target_std+1e-8)
             condition = (condition-self.condition_mean) / (self.condition_std+1e-8)
-            starts = list(range(0, target.shape[1] - self.window_length+1, self.stride))
+
+            starts = list(range(0, target.shape[1] - self.window_length+ 1, self.stride))
+
             if self.shufflewindows:
                 random.shuffle(starts)
 
@@ -471,19 +476,20 @@ def stepsperday(resolution):
     return int(pd.Timedelta("1D") /pd.Timedelta(resolution))
 
 # todo make same thing for min max scaler
-def calc_mean_std(files, columns, resolution=None):
+def calc_mean_std(files, columns, aggregation, resolution=None):
     n=0
     total = np.zeros(len(columns),dtype=np.float64)
     total_sq = np.zeros(len(columns),dtype=np.float64)
 
-    for path in files:
+    for path in tqdm(files):
         if not Path(path).exists():
             print(f"missing:{path}")
             continue
         ts = pd.read_hdf(path, key="timeseries")[columns]
 
         if resolution is not None:
-            ts = ts.resample(resolution).mean()
+            agg = {col: aggregation[col] for col in columns}
+            ts = ts.resample(resolution).agg(agg)
 
         arr = ts.to_numpy(dtype=np.float64)
 
@@ -663,7 +669,28 @@ def load_stats(path):
 
     return stats
 
-def select_stats(stats, columns):
-    mean = torch.tensor([stats[col]["mean"] for col in columns], dtype=torch.float32).unsqueeze(1)
+def select_stats(stats, columns, zero_cols=()):
+    mean = torch.tensor([0.0 if col in zero_cols else stats[col]["mean"] for col in columns], dtype=torch.float32).unsqueeze(1)
     std = torch.tensor([stats[col]["std"] for col in columns],dtype=torch.float32).unsqueeze(1)
     return mean, std
+
+
+def build_condition(preprocessor, train_df, params, batch_size, device="cpu"):
+    param_dict = {}
+    for col in preprocessor.static_cat_cols:
+        param_dict[col] = train_df[col].mode().iloc[0]
+    for col in preprocessor.static_cont_cols:
+        param_dict[col] = train_df[col].median()
+    for col in preprocessor.static_bool_cols:
+        param_dict[col] = bool(train_df[col].mode().iloc[0])
+
+    param_dict.update(params)
+
+    df = pd.DataFrame([param_dict] * batch_size)
+    out = preprocessor.transform(df)
+
+    return {
+        "static_cat": torch.from_numpy(out["categorical"]).long().to(device),
+        "static_cont": torch.from_numpy(out["continuous"]).float().to(device),
+        "static_bool": torch.from_numpy(out["boolean"]).float().to(device),
+    }
