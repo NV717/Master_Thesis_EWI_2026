@@ -10,11 +10,28 @@ import torch
 from skmultilearn.model_selection import IterativeStratification
 from scipy.stats import ks_2samp
 import shutil
-from pathlib import Path
 
 RESULTS_DIR = r"DataPreparation/Generation/Generation"
 test_path = r"Generation/Generation/run_000013.h5"
 MANIFEST_PATH = r"DataPreparation/Generation/manifest.parquet"
+
+def get_realized_manifest(results_dir: Path):
+    completed_runs = results_dir.glob("run_*.h5")
+    dfs = [pd.read_hdf(run, key="params") for run in tqdm(completed_runs)]
+    realised_manifest = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    realised_manifest = realised_manifest.sort_values(by=["seed"]).reset_index(drop=True)
+    return realised_manifest
+
+def clean_list_cols(realized_manifest: pd.DataFrame, planned_manifest: pd.DataFrame):
+    # sum persons
+    realized_manifest["n_persons"] = realized_manifest["n_persons"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    realized_manifest["n_persons_sum"] = realized_manifest["n_persons"].apply(sum)
+    #get unique appliances
+    realized_manifest["appliances"] = realized_manifest["appliances"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    realized_manifest["appliances_unique"] = realized_manifest["appliances"].apply(lambda x: list(dict.fromkeys(item for sublist in x for item in sublist)))
+    # get building id back
+    realized_manifest = realized_manifest.merge(planned_manifest[["seed", "building_id", "run_id"]], on="seed",how="left")
+    return realized_manifest
 
 
 def manifest_distribution(manifest: pd.DataFrame):
@@ -26,7 +43,8 @@ def manifest_distribution(manifest: pd.DataFrame):
     print("Overview")
     print("="*80)
     print(f"Rows: {len(manifest):,}")
-    print(f"Unique buildings: {manifest['a_ref'].nunique():,}")
+    print(f"Unique areas (a_ref): {manifest['a_ref'].nunique():,}")
+    print(f"Unique buildings: {manifest['building_id'].nunique():,}")
     print(f"Unique runs: {manifest['seed'].nunique():,}")
     print("MISSING VALUES")
     print("=" * 80)
@@ -66,7 +84,7 @@ def manifest_distribution(manifest: pd.DataFrame):
 
     #Check Categorial Distribution for unique buildings only
 
-    building_df = (manifest.drop_duplicates("a_ref").copy())
+    building_df = (manifest.drop_duplicates("building_id").copy())
     print("=" * 80)
     print("BUILDING-LEVEL DATA")
     print("=" * 80)
@@ -196,7 +214,7 @@ def comp_manifests(planned_manifest: pd.DataFrame, realised_manifest: pd.DataFra
     ).all()
 
 
-    realised_manifest_bench = realised_manifest.drop(columns=["weatherFilepath", "weatherID", "resolved_climateRegion","resolved_latitude","resolved_longitude","state_seed","apartment_seeds","maxLoadViolation_kW","runtime_seconds"])
+    realised_manifest_bench = realised_manifest.drop(columns=["weatherFilepath", "weatherID", "resolved_climateRegion","resolved_latitude","resolved_longitude","state_seed","apartment_seeds","maxLoadViolation_kW","runtime_seconds", "appliances"])
     assert len(realised_manifest_bench) == len(planned_cols_with_missing)
     realised_manifest_bench["run_id"] = planned_cols_with_missing["run_id"].to_numpy()
     realised_manifest_bench["building_id"] = planned_cols_with_missing["building_id"].to_numpy()
