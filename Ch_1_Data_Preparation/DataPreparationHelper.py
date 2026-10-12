@@ -214,7 +214,7 @@ def comp_manifests(planned_manifest: pd.DataFrame, realised_manifest: pd.DataFra
     ).all()
 
 
-    realised_manifest_bench = realised_manifest.drop(columns=["weatherFilepath", "weatherID", "resolved_climateRegion","resolved_latitude","resolved_longitude","state_seed","apartment_seeds","maxLoadViolation_kW","runtime_seconds", "appliances"])
+    realised_manifest_bench = realised_manifest.drop(columns=["weatherFilepath", "weatherID", "resolved_climateRegion","resolved_latitude","resolved_longitude","state_seed","apartment_seeds","maxLoadViolation_kW","runtime_seconds", "appliances", "appliances_unique"])
     assert len(realised_manifest_bench) == len(planned_cols_with_missing)
     realised_manifest_bench["run_id"] = planned_cols_with_missing["run_id"].to_numpy()
     realised_manifest_bench["building_id"] = planned_cols_with_missing["building_id"].to_numpy()

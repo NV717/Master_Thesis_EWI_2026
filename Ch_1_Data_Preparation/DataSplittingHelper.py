@@ -28,7 +28,9 @@ def remove_daylightsaving(ts):
 
 
 class h5Dataset(IterableDataset):
-    def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_scaler,condition_scaler,static_by_run_id,aggregation,manifest_split=None,norm_by_col=None,resolution=None,shufflefiles=False,shufflewindows=True, buffer_size=0):
+    def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_scaler,condition_scaler, target_norm,condition_norm,
+                 static_by_run_id,aggregation,resolution=None,shufflefiles=False,
+                 shufflewindows=True, buffer_size=0):
         super().__init__()
         self.files = list(files)
         self.run_ids = list(rund_ids)
@@ -45,16 +47,16 @@ class h5Dataset(IterableDataset):
         self.shufflewindows = shufflewindows
         self.buffer_size = buffer_size
         self.aggregation = aggregation
-        norm_by_col = norm_by_col or {}
-        self.target_norm = build_norm_factors(manifest_split, self.gen_cols, norm_by_col) if norm_by_col else None
-        self.condition_norm = build_norm_factors(manifest_split, self.cond_cols, norm_by_col) if norm_by_col else None
-
+        self.target_norm = target_norm
+        self.condition_norm = condition_norm
 
         if len(self.files) != len(self.run_ids):
             raise ValueError("input doesnt have same length")
 
         missing_files = [path for path in self.files if not Path(path).exists()]
-
+        missing_norm = [r for r in self.run_ids if r not in self.target_norm or r not in self.condition_norm]
+        if missing_norm:
+            raise KeyError(f"{len(missing_norm)} run_ids have no norm factors {missing_norm[:3]}")
         if missing_files:
             raise FileNotFoundError(f"{len(missing_files)} files are missing")
 
@@ -85,9 +87,8 @@ class h5Dataset(IterableDataset):
 
         for path, run_id in items:
             target, condition = self._read_series(path)
-            if self.target_norm is not None:
-                target = target / self.target_norm[run_id]
-                condition = condition / self.condition_norm[run_id]
+            target = target / self.target_norm[run_id]
+            condition = condition / self.condition_norm[run_id]
 
             # normalisierung basierend auf gewähltem scaler
             target = apply_scaler(target, self.target_scaler)
@@ -114,6 +115,10 @@ class h5Dataset(IterableDataset):
                     "static_bool": static["boolean"],
                 }
 
+
+                sample["target_norm"] = torch.from_numpy(self.target_norm[run_id])
+                sample["condition_norm"] = torch.from_numpy(self.condition_norm[run_id])
+
                 if self.buffer_size <= 0:
                     yield sample
                     continue
@@ -129,6 +134,108 @@ class h5Dataset(IterableDataset):
         random.shuffle(buffer)
         for sample in buffer:
             yield sample
+
+class SampleWindowDataset(h5Dataset):
+    def __init__(self, index, split_files, **kwargs):
+
+        path_by_run = {Path(p).stem: Path(p) for p in split_files}
+        available = index["run_id"].isin(path_by_run)
+
+        if not available.all():
+            missing = index.loc[~available, "run_id"].nunique()
+            print(f"skipping {missing} runs without a local file "
+                  f"({(~available).sum()} windows)")
+
+        index = index[available].reset_index(drop=True)
+
+        run_ids = list(dict.fromkeys(index["run_id"]))
+
+        files = [path_by_run[r] for r in run_ids]
+
+        super().__init__(files,run_ids,shufflefiles=False, shufflewindows=False,buffer_size=0, **kwargs)
+        self.index = index.reset_index(drop=True)
+        self.starts_per_run = {rid: g for rid,g in self.index.groupby("run_id")}
+
+    def __len__(self):
+        return len(self.index)
+
+    def __iter__(self):
+        items =list(zip(self.files, self.run_ids))
+        w = get_worker_info()
+        if w is not None:
+            items = items[w.id::w.num_workers]
+
+        for path, run_id in items:
+            target, condition = self._read_series(path)
+            if self.target_norm is not None:
+                target = target/ self.target_norm[run_id]
+                condition = condition/self.condition_norm[run_id]
+            target = apply_scaler(target, self.target_scaler)
+            condition = apply_scaler(condition, self.condition_scaler)
+
+            static = self.static_by_run_id[run_id]
+
+            for row, start in zip(self.starts_per_run[run_id].index,self.starts_per_run[run_id]["start_hour"]):
+                end = start + self.window_length
+                assert end <= target.shape[1], f"{run_id}: window {start}-{end} out of range"
+
+                target_window = np.ascontiguousarray(target[:,start:end])
+                condition_window = np.ascontiguousarray(condition[:,start:end])
+
+                sample = {
+                    "row": row,
+                    "target": torch.from_numpy(target_window),
+                    "condition": torch.from_numpy(condition_window),
+                    "static_cat": static["categorical"],
+                    "static_cont": static["continuous"],
+                    "static_bool": static["boolean"],
+                }
+
+                yield sample
+
+
+
+def draw_sampling_windows(split_df,strat_cols, n_runs, n_windows, window_steps, seed=42):
+    rng = np.random.default_rng(seed)
+    # select run
+    grps = split_df.groupby(strat_cols)
+    n = math.ceil((n_runs/len(grps)))
+    assert n > 0, f"n_runs must be chosen higher"
+    picked_rows = []
+    for key, grp in grps:
+        row = grp.sample(n=n,random_state=int(rng.integers(1<<31)))
+        picked_rows.append(row)
+
+    rows = pd.concat(picked_rows)
+
+    #select days
+    month_of_day = pd.DataFrame(pd.date_range("2026-01-01", periods=365).month, columns=["month"])
+    output = []
+    for _,r in rows.iterrows():
+        day_windows = month_of_day.groupby(month_of_day["month"]).apply(lambda s: s.sample(1, random_state=int(rng.integers(1 << 31))))
+        # get actual indices since daywindows are tuples cause the multiindex of groupby
+        day_idx = day_windows.index.get_level_values(1).to_numpy()
+        additional = n_windows - len(day_idx)
+        # minimum of 12 Windows no matter the input param
+        if additional > 0:
+            rest = np.setdiff1d(np.arange(365), day_idx)
+            day_idx_new = rng.choice(rest, additional, replace=False)
+            day_idx = np.concatenate([day_idx, day_idx_new])
+        for d in np.sort(day_idx):
+            output.append((
+                r["run_id"],
+                int(d) * window_steps,
+                int(d),
+                r["building_id"],
+                r["buildingType"],
+                r["buildingAgeBin"],
+                r["year"]
+
+            ))
+
+    return pd.DataFrame(output,columns=["run_id", "start_hour", "day", "building_id",
+                                       "buildingType", "buildingAgeBin", "year"])
+
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
