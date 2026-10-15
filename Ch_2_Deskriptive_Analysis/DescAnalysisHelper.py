@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.ticker as mtick
+from matplotlib.lines import Line2D
 import numpy as np
 import ast
 TYPES = ["SFH", "TH", "MFH", "AB"]
@@ -161,3 +162,129 @@ def boxplot_specific_energy(ts, y="sh_sum_yearly_per_a_ref", ylabel="space heati
     fig.suptitle(title,
                  x=0.01, ha="left", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
+
+
+def plot_parameter_scatter_cont(data, en_type, params, figsize=(15,13)):
+    fig, axes = plt.subplots(len(en_type),len(params), figsize=figsize, squeeze=False)
+    for i ,(en_row, en_label) in enumerate(en_type.items()):
+        for j ,(param_row, param_label) in enumerate(params.items()):
+            ax = axes[i,j]
+            #x_vals = data[param_row]
+            for t in TYPES:
+                y_vals = data[data["buildingType"]==t][en_row]
+                x_vals = data[data["buildingType"]==t][param_row]
+                ax.scatter(x_vals,y_vals,s=3, alpha=0.15,color=COLOR_DICT[t], edgecolor=None)
+            x = data[param_row].to_numpy()
+            y = data[en_row].to_numpy()
+
+
+            mask = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+
+            log_x = np.log10(x[mask])
+            log_y = np.log10(y[mask])
+
+            corr = np.corrcoef(log_x, log_y)[0, 1]
+
+            p = np.polynomial.polynomial.Polynomial.fit(np.log10(data[param_row]), np.log10(data[en_row]), deg=1)
+            b,m = p.convert().coef
+
+            corr = np.corrcoef(np.log10(data[param_row]), np.log10(data[en_row]))[0, 1]
+
+            x_slope = np.array([data[param_row].min(), data[param_row].max()])
+            y_slope = 10** p(np.log10(x_slope))
+
+            ax.plot(x_slope, y_slope, color="#1f2933", lw=1.2, ls="--")
+
+
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+
+            ax.text(
+                0.04, 0.95,
+                f"r = {corr:.2f}",
+                transform=ax.transAxes,
+                va="top",
+                fontsize=9
+            )
+            ax.grid(True, which="both", color="#e4e8ed", lw=0.5); ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+            if j == 0: ax.set_ylabel(en_label)
+            if i == 2: ax.set_xlabel(param_label)
+
+    fig.legend([Line2D([], [], marker="o", ls="", color=COLOR_DICT[t], label=t) for t in TYPES], TYPES,
+               title="Building type", loc="upper right", ncol=4, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+
+def scatter_specific_energy_by_building_type(
+    ts, y="sh_sum_yearly_per_a_ref", x="temperature_mean",
+    ylabel="space heating in kWh/(m²*a)",
+    title="Space heating demand by building type and age class",
+    logy=False
+):
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5), sharey=True)
+
+    age_bins = sorted(ts["buildingAgeBin"].dropna().unique())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(age_bins)))
+    age_colors = dict(zip(age_bins, colors))
+    for ax, t in zip(axes, TYPES):
+        sub = ts.loc[ts["buildingType"] == t]
+
+        for age in age_bins:
+            age_sub = sub.loc[sub["buildingAgeBin"] == age]
+            ax.scatter(age_sub[x],age_sub[y],s=3,alpha=0.25,color=age_colors[age],edgecolor="none")
+
+        valid = sub[[x, y]].dropna()
+        valid = valid[(valid[x] > 0) & (valid[y] > 0)]
+
+        if len(valid) >= 2:
+            log_x = np.log10(valid[x])
+            log_y = np.log10(valid[y])
+
+            p = np.polynomial.polynomial.Polynomial.fit(log_x, log_y, deg=1)
+
+            b, m = p.convert().coef
+            x_slope = np.linspace(valid[x].min(), valid[x].max(), 100)
+            y_slope = 10 ** p(np.log10(x_slope))
+            #ax.plot(x_slope, y_slope,color="#1f2933", lw=1.2, ls="--")
+            corr = np.corrcoef(log_x, log_y)[0, 1]
+            #ax.text(0.04, 0.95,f"r = {corr:.2f}",transform=ax.transAxes,va="top",fontsize=9)
+
+        ax.set_title(f"{t} (n = {len(sub):,} runs)",loc="left",fontweight="bold")
+
+        ax.grid(axis="y", color="#e4e8ed")
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+
+        if logy:
+            ax.set_yscale("log")
+            ax.set_xscale("log")
+
+        ax.set_xlabel(x)
+
+    axes[0].set_ylabel(ylabel)
+
+
+    handles = [
+        Line2D(
+            [], [], marker="o", linestyle="",
+            color=age_colors[age],
+            label=str(age),
+            markersize=6
+        )
+        for age in age_bins
+    ]
+
+    fig.legend(
+        handles=handles,
+        title="Building age class",
+        loc="upper right",
+        ncol=min(len(age_bins), 6),
+        frameon=False
+    )
+
+    fig.suptitle(
+        title, x=0.01, ha="left",
+        fontsize=14, fontweight="bold"
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
