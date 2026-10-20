@@ -22,6 +22,47 @@ def get_realized_manifest(results_dir: Path):
     realised_manifest = realised_manifest.sort_values(by=["seed"]).reset_index(drop=True)
     return realised_manifest
 
+def add_appliance_shares(manifest):
+    manifest = manifest.copy()
+    apls_per_run = manifest["appliances"].map(lambda s: ast.literal_eval(s) if isinstance(s, str) else s)
+    assert manifest["n_apartments"].sum() == apls_per_run.apply(len).sum()
+    apls_lists = apls_per_run.map(lambda full_list: [item for sub_list in full_list for item in sub_list])
+    unique_apls = sorted(list(apls_lists.explode().unique()))
+    shares = pd.DataFrame(
+        {f"apl_{a}": apls_lists.apply(lambda fulllist: sum(a == apl for apl in fulllist)) / apls_per_run.apply(len) for a in unique_apls}, index=manifest.index,
+    )
+
+    return  pd.concat([manifest, shares], axis=1), unique_apls
+
+def add_appliance_counts(df):
+    df = df.copy()
+    apls_per_run = df["appliances"].map(lambda s: ast.literal_eval(s) if isinstance(s, str) else s)
+    df["appliances_per_apartment"] = apls_per_run.map(lambda apartments: [len(appliances) for appliances in apartments])
+    df["total_appliances"] = df["appliances_per_apartment"].map(sum)
+    df["mean_appliances_per_apartment"] = df["total_appliances"] / df["n_apartments"]
+    return df
+
+def per_apartment_loads(df):
+    df = df.copy()
+    df["elec_min_per_apartment"] =df["elec_min"] / df["n_apartments"]
+    df["elec_max_per_apartment"] =df["elec_max"] / df["n_apartments"]
+    df["elec_mean_per_apartment"] =df["elec_mean"] / df["n_apartments"]
+    df["elec_mean_01_05_per_apartment"] =df["elec_mean_01_05"] / df["n_apartments"]
+    df["elec_p05_per_apartment"] =df["elec_p05"] / df["n_apartments"]
+    df["elec_p10_per_apartment"] =df["elec_p10"] / df["n_apartments"]
+    df["elec_p95_per_apartment"] =df["elec_p95"] / df["n_apartments"]
+    df["elec_p99_per_apartment"] =df["elec_p99"] / df["n_apartments"]
+    df["elec_sum_yearly_per_apartment"] =df["elec_sum_yearly"] / df["n_apartments"]
+    df["peak_to_average"] = df["elec_max"] / df["elec_mean"]
+    df["buildingGroup"] = df["buildingType"].replace({
+        "SFH": "SFH + TH",
+        "TH": "SFH + TH",
+        "MFH": "MFH + AB",
+        "AB": "MFH + AB"
+    })
+    return df
+
+
 def clean_list_cols(realized_manifest: pd.DataFrame, planned_manifest: pd.DataFrame):
     # sum persons
     realized_manifest["n_persons"] = realized_manifest["n_persons"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
@@ -283,9 +324,12 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
             "a_ref": a_ref,
         }
 
-
+        night_mask = (ts.index.hour >= 1) & (ts.index.hour < 5)
         for prefix, col in load_domains.items():
             load = ts[col]
+
+            night_load = load.loc[night_mask]
+
             annual_energy = load.sum() * dt_hours
             res.update({
                 f"{prefix}_sum_yearly": annual_energy,
@@ -294,9 +338,34 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
                 f"{prefix}_max":load.max(),
                 f"{prefix}_min":load.min(),
                 f"{prefix}_mean":load.mean(),
+                f"{prefix}_p05": load.quantile(0.05),
+                f"{prefix}_p10": load.quantile(0.10),
                 f"{prefix}_p95":load.quantile(0.95),
                 f"{prefix}_p99": load.quantile(0.99),
+                f"{prefix}_mean_01_05": night_load.mean(),
             })
+
+            daily = load.groupby(load.index.date)
+            daily_stats = {
+                "max": daily.max(),
+                "min": daily.min(),
+                "mean": daily.mean(),
+                "p05": daily.quantile(0.05),
+                "p10": daily.quantile(0.10),
+                "p95": daily.quantile(0.95),
+                "p99": daily.quantile(0.99),
+            }
+
+            res[f"{prefix}_load_factor"] = load.mean() / load.max() if load.max() > 0 else np.nan
+
+            daily_peak = daily.max()
+            res[f"{prefix}_daily_load_factor_avg"] = (
+                (daily.mean() / daily_peak).where(daily_peak > 0).mean()
+            )
+
+            for name, s in daily_stats.items():
+                res[f"{prefix}_daily_{name}_avg"] = s.mean()
+                res[f"{prefix}_daily_{name}_std"] = s.std()
 
         if "T" in ts.columns:
             temp = ts["T"]
@@ -308,6 +377,9 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
                 "temperature_p05":temp.quantile(0.05),
                 "temperature_p95":temp.quantile(0.95),
             })
+
+
+
 
         for col in [
             "buildingType",

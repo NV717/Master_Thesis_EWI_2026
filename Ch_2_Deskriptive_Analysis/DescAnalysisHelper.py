@@ -3,8 +3,10 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.ticker as mtick
 from matplotlib.lines import Line2D
+from collections import Counter
 import numpy as np
 import ast
+import seaborn as sns
 TYPES = ["SFH", "TH", "MFH", "AB"]
 COLOR_DICT = {"SFH": "#2f6db5", "TH": "#e69f00", "MFH": "#2a9d8f", "AB": "#c44e52"}
 
@@ -288,3 +290,532 @@ def scatter_specific_energy_by_building_type(
     )
 
     fig.tight_layout(rect=(0, 0, 1, 0.88))
+
+def load_TRY_files(try_path):
+    dirs = {}
+    for year in [2015, 2045]:
+        for region in [f"{i:02d}" for i in range(16)]:
+            year_str = f"TRY{year}"
+            trgt_dir = try_path / year_str /str(region)
+            files = trgt_dir.glob("*.dat")
+            for file in list(files):
+                weather_type = file.stem.split("_")[-1]
+                weather = pd.read_csv(file, sep=r"\s+", skiprows=list(range(32)) + [33], skip_blank_lines=True,encoding="utf-8")
+                weather.index = pd.to_datetime({"year":year, "month": weather["MM"],"day": weather["DD"],"hour": weather["HH"]-1})
+                weather.index.name = "datetime"
+                dirs.setdefault(year, {}).setdefault(region, {}).setdefault(weather_type, {})[file.stem] = weather
+
+    weather_df = pd.concat(
+        {
+            (year, region, weather_type, file_id): df
+            for year, regions in dirs.items()
+            for region, types in regions.items()
+            for weather_type, files in types.items()
+            for file_id, df in files.items()
+        },
+        names=["year", "region", "weather_type", "file_id"]
+    )
+
+    mean_df = weather_df.groupby(level=["year", "region", "weather_type", "file_id"])["t"].mean().reset_index(name="mean_temp")
+    return weather_df, mean_df
+
+def plot_TRYs(weather_df, region):
+
+    daily_temp =weather_df.groupby(level=["year", "region", "weather_type", "file_id"]).resample("D", level="datetime")["t"].mean().rename("t_mean").reset_index()
+    daily_quantiles = daily_temp.groupby(["year", "region", "weather_type", "datetime"])["t_mean"].agg(
+            q10=lambda x: x.quantile(0.10),
+            median="median",
+            mean="mean",
+            q90=lambda x: x.quantile(0.90)).reset_index()
+
+    region = region
+    types = ["Jahr", "Somm", "Wint"]
+    years = [2015, 2045]
+    colors = {
+        "Jahr": "#32a852",
+        "Somm": "#de290d",
+        "Wint": "#101dcc"
+    }
+    labels = {
+        "Jahr": "Average",
+        "Somm": "Hot",
+        "Wint": "Cold"
+    }
+    fig, axes = plt.subplots(
+        2, 1,
+        figsize=(14, 8),
+        sharex=True,
+        sharey=True
+    )
+    linestyles = {
+        "Jahr": "-",
+        "Somm": "--",
+        "Wint": ":"
+    }
+    for ax, year in zip(axes, years):
+        for weather_type in types:
+            sub = daily_quantiles.loc[
+                (daily_quantiles["region"] == region) &
+                (daily_quantiles["weather_type"] == weather_type) &
+                (daily_quantiles["year"] == year)
+            ].sort_values("datetime")
+            x = sub["datetime"].dt.dayofyear.to_numpy()
+            median = sub["median"].to_numpy(dtype=float)
+            q10 = sub["q10"].to_numpy(dtype=float)
+            q90 = sub["q90"].to_numpy(dtype=float)
+            ax.fill_between(x,q10,q90,color=colors[weather_type],alpha=0.1,linewidth=0)
+            ax.plot(
+        x,
+        median,
+        color=colors[weather_type],
+        linestyle=linestyles[weather_type],
+        linewidth=1.5,
+        label=labels[weather_type]
+    )
+
+        ax.set_title(
+            str(year),
+            loc="left",
+            fontweight="bold"
+        )
+
+        ax.axhline(
+            0,
+            color="gray",
+            linewidth=0.8,
+            linestyle="--"
+        )
+
+        ax.grid(axis="y", color="#e4e8ed")
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_ylabel("Temperature °C")
+
+    axes[-1].set_xlabel("Day of year")
+
+    axes[0].legend(
+        frameon=False,
+        ncol=3,
+        loc="upper right"
+    )
+
+    fig.suptitle(
+        f"Daily mean temperatures CR {region}",
+        x=0.125,
+        ha="left",
+        fontsize=15,
+        fontweight="bold"
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+def boxplot_TRY(mean_df):
+
+    sns.set_theme(style="white")
+
+    labels = {
+        "Jahr": "Average",
+        "Somm": "Hot",
+        "Wint": "Cold"
+    }
+
+    g = sns.catplot(
+        data=mean_df,
+        x="region",
+        y="mean_temp",
+        hue="year",
+        col="weather_type",
+        col_order=["Jahr", "Somm", "Wint"],
+        kind="box",
+        height=5,
+        aspect=1.2,
+        palette=["#76B7AD", "#E99A7D"],
+        sharey=True,
+        fliersize=2.5
+    )
+
+    for ax, t in zip(g.axes.flat, ["Jahr", "Somm", "Wint"]):
+        sub = mean_df[mean_df["weather_type"] == t]
+
+        ax.set_title(
+            f"{labels[t]} (n = {len(sub):,} files)",
+            loc="left",
+            fontweight="bold"
+        )
+
+        ax.grid(axis="y", color="#e4e8ed")
+        ax.set_axisbelow(True)
+
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(axis="x", length=0)
+
+        plt.setp(
+            ax.get_xticklabels(),
+            rotation=45,
+            ha="right"
+        )
+
+    g.set_axis_labels("Region", "Mean temperature °C")
+
+    g.figure.suptitle(
+        "Mean temperature by region, year and weather type",
+        x=0.03,
+        ha="left",
+        fontweight="bold",
+        fontsize=15
+    )
+
+    g.figure.subplots_adjust(top=0.85)
+    plt.show()
+
+def plot_appliance_ownership_total(manifest):
+    manifest = manifest.copy()
+    apls_per_run = manifest["appliances"].map(lambda s: ast.literal_eval(s) if isinstance(s, str) else s)
+    assert manifest["n_apartments"].sum() == apls_per_run.apply(len).sum()
+    apls_lists = apls_per_run.map(lambda full_list: [item for sub_list in full_list for item in sub_list])
+    apl_df = pd.DataFrame({"buildingType": manifest["buildingType"], "appliance":apls_lists}).explode("appliance")
+    owned = apl_df.groupby("appliance").size().sort_values()
+    owned_rel = owned/apls_per_run.apply(len).sum()
+
+    labels = owned_rel.index.str.replace("_", " ")
+    fig, ax = plt.subplots(figsize=(5,7))
+    ax.barh(labels, owned_rel.values,color="#2f6db5", height=0.65)
+    for i, v in enumerate(owned_rel.values):
+        ax.text(v + 0.01, i, f"{v:.0%}", va="center", fontsize=9)
+
+    ax.xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    ax.set_xlim(0, 1.12)
+    ax.set_xticks(np.arange(0, 1.01, 0.2))
+    ax.tick_params(axis="y", length=0)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.grid(axis="x", color="0.85", linewidth=0.7)
+    ax.set_axisbelow(True)
+    ax.set_title(f"Appliance ownership", loc="left", fontweight="bold")
+    ax.set_xlabel("Share of Apartments")
+    fig.tight_layout()
+
+    return owned_rel
+
+def plot_total_appliances_vs_metric(df,metric,ylabel=None,title=None,logy=False,x="mean_appliances_per_apartment"):
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5), sharey=True)
+    for ax, t in zip(axes.flat, TYPES):
+        sub = df.loc[df["buildingType"] == t]
+        x_group = sub[x].round()
+        params = sorted(x_group.dropna().unique())
+        groups = [sub.loc[x_group == a, metric].dropna().values for a in params]
+
+        ax.boxplot(
+            groups,
+            positions=range(len(params)),
+            widths=0.6,
+            patch_artist=True,
+            whis=1.5,
+            medianprops=dict(color="#1f2933", lw=1.3),
+            boxprops=dict(
+                facecolor=COLOR_DICT[t],
+                alpha=0.55,
+                edgecolor=COLOR_DICT[t]
+            ),
+            whiskerprops=dict(color=COLOR_DICT[t]),
+            capprops=dict(color=COLOR_DICT[t]),
+            flierprops=dict(
+                marker=".",
+                markersize=3,
+                markeredgecolor="#6b7785",
+                alpha=0.5
+            )
+        )
+
+        ax.set_xticks(range(len(params)))
+        ax.set_xticklabels([f"{p:g}" for p in params])
+        ax.tick_params(axis="x", rotation=45)
+
+        ax.set_title(f"{t} (n = {len(sub):,} runs)",loc="left",fontweight="bold")
+        ax.set_xlabel("Appliances per apartment")
+        ax.set_ylabel("")
+
+        ax.grid(axis="y", color="#e4e8ed")
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+
+        if logy:
+            ax.set_yscale("log")
+
+    axes[0].set_ylabel(ylabel if ylabel else metric)
+    fig.suptitle(
+        title if title else f"Total appliances vs {metric}",
+        x=0.01,
+        ha="left",
+        fontsize=14,
+        fontweight="bold"
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.show()
+
+
+def plot_group_share_vs_metric(df, group, metric="elec_mean_per_apartment",
+                               ylabel="Mean electricity load per apartment in kW"):
+    share_col = f"share_{group}"
+    data = df.copy()
+    bins = [-0.001, 0, 0.25, 0.5, 0.999999, 1.0]
+    labels = ["0%", "0–25%", "25–50%", "50–100%", "100%"]
+    data["share_bin"] = pd.cut(
+        data[share_col],
+        bins=bins,
+        labels=labels,
+        include_lowest=True
+    )
+    fig, axes = plt.subplots(
+        1, 4,
+        figsize=(18, 5),
+        sharey=True
+    )
+    for ax, t in zip(axes.flat, TYPES):
+        sub = data.loc[data["buildingType"] == t]
+
+        available = [
+            label for label in labels
+            if (sub["share_bin"] == label).any()
+        ]
+
+        groups = [
+            sub.loc[sub["share_bin"] == label, metric]
+            .dropna().values
+            for label in available
+        ]
+
+        ax.boxplot(
+            groups,
+            positions=range(len(available)),
+            widths=0.6,
+            patch_artist=True,
+            whis=1.5,
+            medianprops=dict(color="#1f2933", lw=1.3),
+            boxprops=dict(
+                facecolor=COLOR_DICT[t],
+                alpha=0.55,
+                edgecolor=COLOR_DICT[t]
+            ),
+            whiskerprops=dict(color=COLOR_DICT[t]),
+            capprops=dict(color=COLOR_DICT[t]),
+            flierprops=dict(
+                marker=".",
+                markersize=3,
+                markeredgecolor="#6b7785",
+                alpha=0.5,
+
+            )
+        )
+
+        ax.set_xticks(range(len(available)))
+        ax.set_xticklabels(available, rotation=35)
+        ax.set_title(f"{t} (n = {len(sub):,} runs)", loc="left", fontweight="bold")
+        ax.set_xlabel("Appliance group ownership fraction")
+        ax.set_ylabel("")
+        ax.grid(axis="y", color="#e4e8ed")
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0].set_ylabel(ylabel)
+    fig.suptitle(f"{group} appliance ownership vs. {metric}", x=0.01, ha="left", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.show()
+
+def plot_appliance_groupshare_2x5(df,metric="elec_max_per_apartment",ylabel="Maximum electricity load per apartment in kW"):
+    data = df.copy()
+    bins = [-0.001, 0, 0.25, 0.5, 0.999999, 1.0]
+    labels = ["0%", "0–25%", "25–50%", "50–100%", "100%"]
+    building_groups = ["SFH + TH", "MFH + AB"]
+    appliance_groups = list(APPLIANCE_GROUPS.keys())
+    group_colors = {"SFH + TH": "#8b865b","MFH + AB": "#926866"}
+    fig, axes = plt.subplots(2, len(appliance_groups),figsize=(4 * len(appliance_groups), 9),sharey="row")
+
+    for i, bgroup in enumerate(building_groups):
+        for j, agroup in enumerate(appliance_groups):
+            ax = axes[i, j]
+            share_col = f"share_{agroup}"
+            sub = data.loc[data["buildingGroup"] == bgroup, [share_col, metric]].copy()
+            sub["share_bin"] = pd.cut(
+                sub[share_col],
+                bins=bins,
+                labels=labels,
+                include_lowest=True
+            )
+
+            available = [
+    label for label in labels
+    if sub.loc[sub["share_bin"] == label, metric].notna().any()
+]
+            positions = [labels.index(label) for label in available]
+            groups = [sub.loc[sub["share_bin"] == label, metric].dropna().values for label in available]
+
+            if len(groups) > 0:
+                ax.boxplot(
+                    groups,
+                    positions=positions,
+                    widths=0.6,
+                    patch_artist=True,
+                    whis=1.5,
+                    medianprops=dict(color="#1f2933", lw=1.3),
+                    boxprops=dict(
+                        facecolor=group_colors[bgroup],
+                        alpha=0.6,
+                        edgecolor=group_colors[bgroup]
+                    ),
+                    whiskerprops=dict(color=group_colors[bgroup]),
+                    capprops=dict(color=group_colors[bgroup]),
+                    flierprops=dict(
+                        marker=".",
+                        markersize=2.5,
+                        markeredgecolor="#6b7785",
+                        alpha=0.45
+                    )
+                )
+
+            counts = [
+                sub.loc[sub["share_bin"] == label, metric].notna().sum()
+                for label in labels
+            ]
+
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels([
+                f"{label}\n(n={c})" for label, c in zip(labels, counts)
+            ])
+
+            ax.set_xlim(-0.5, len(labels) - 0.5)
+
+            if j == 0:
+                ax.set_ylabel(ylabel)
+            else:
+                ax.set_ylabel("")
+
+            if i == 1:
+                ax.set_xlabel("Ownership fraction")
+            else:
+                ax.set_xlabel("")
+
+            if i == 0:
+                ax.set_title(agroup, loc="left", fontweight="bold")
+
+            if j == 0:
+                n_runs = (data["buildingGroup"] == bgroup).sum()
+                ax.set_ylabel(ylabel)
+
+            else:
+                ax.set_ylabel("")
+
+            if i == 1:
+                ax.set_xlabel("Ownership fraction")
+            else:
+                ax.set_xlabel("")
+
+            ax.grid(axis="y", color="#e4e8ed")
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+
+
+    fig.suptitle(
+        f"Appliance group ownership vs. {metric}",
+        x=0.06,
+        y=0.98,
+        ha="left",
+        fontsize=14,
+        fontweight="bold"
+    )
+
+    fig.subplots_adjust(
+        left=0.06,
+        right=0.99,
+        top=0.86,
+        bottom=0.10,
+        hspace=0.65,
+        wspace=0.12
+    )
+
+    for j, agroup in enumerate(appliance_groups):
+        axes[0, j].set_title(
+            agroup,
+            loc="left",
+            fontweight="bold",
+            fontsize=11,
+            pad=10
+        )
+
+    for i, bgroup in enumerate(building_groups):
+        n_runs = (data["buildingGroup"] == bgroup).sum()
+
+        row_pos = axes[i, 0].get_position()
+
+        fig.text(
+            row_pos.x0,
+            row_pos.y1 + (0.045 if i == 0 else 0.025),
+            f"{bgroup} (n = {n_runs:,} runs)",
+            ha="left",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold"
+        )
+
+    plt.show()
+
+def plot_simultaneity_effect(df):
+    plt.figure(figsize=(8, 5))
+    sns.boxplot(
+        data=df,
+        x="n_apartments",
+        y="peak_to_average",
+        color="#74a9a3",
+        showfliers=False
+    )
+    plt.xlabel("Number of apartments")
+    plt.ylabel("Peak-to-average load ratio")
+    plt.title("Effect of apartment count on electricity load diversity")
+    plt.grid(axis="y", color="#e4e8ed")
+    plt.tight_layout()
+    plt.show()
+
+def plot_appliance_heatmap(df,share_df):
+    metrics = ["elec_mean","elec_max","elec_min","elec_mean_01_05","elec_p95","elec_p05"]
+
+    corr = df[list(share_df.columns) + metrics].corr(method="spearman")
+    plt.figure(figsize=(8, 5))
+    sns.heatmap(corr.loc[list(share_df.columns), metrics],annot=True,fmt=".2f",cmap="RdBu_r",center=0,vmin=-1,vmax=1)
+    plt.title("Appliance group ownership vs. electricity demand")
+    plt.tight_layout()
+    plt.show()
+
+APPLIANCE_GROUPS = {
+    "Continuous": [
+        "CHEST_FREEZER", "FRIDGE", "FRIDGE_FREEZER", "UPRIGHT_FREEZER",
+    ],
+    "Entertainment": [
+        "TV1", "TV2","TV3","VCR_DVD","RECEIVER", "CD_PLAYER","HIFI"
+    ],
+    "Cleaning": [
+        "DISH_WASHER", "TUMBLE_DRYER", "WASHER_DRYER", "WASHING_MACHINE", "IRON", "VACUUM"
+    ],
+    "Cooking": [
+        "HOB", "KETTLE", "MICROWAVE", "OVEN", "SMALL_COOKING"
+    ],
+    "Other": [
+        "CLOCK", "PHONE","PRINTER","PC", "FAX", "ANSWER_MACHINE"
+    ]
+}
+
+def calculate_group_shares(apartments):
+    appliance_to_group = {appliance: group for group, appliances in APPLIANCE_GROUPS.items() for appliance in appliances}
+    if isinstance(apartments, str):
+        apartments = ast.literal_eval(apartments)
+    n_apartments = len(apartments)
+    counts = Counter()
+    for apartment in apartments:
+        for appliance in set(apartment):
+            group = appliance_to_group.get(appliance)
+            if group is not None:
+                counts[group] += 1
+    shares = {}
+    for group, appliances in APPLIANCE_GROUPS.items():
+        maximum = n_apartments * len(appliances)
+        shares[f"share_{group}"] = (counts[group] / maximum if maximum > 0 else float("nan"))
+
+    return pd.Series(shares)
