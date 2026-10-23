@@ -5,6 +5,7 @@ import ast
 import numpy as np
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 import random
 import torch
 from skmultilearn.model_selection import IterativeStratification
@@ -284,7 +285,492 @@ def comp_manifests(planned_manifest: pd.DataFrame, realised_manifest: pd.DataFra
         print(realised_manifest[realised_manifest["climateRegion"] == reg].groupby(["year_type","future"])["weatherID"].value_counts(normalize=True, dropna=False))
 
 
-def check_timeseries(resultsdir) -> pd.DataFrame:
+# def check_timeseries(resultsdir) -> pd.DataFrame:
+#
+#     resultsdir = Path(resultsdir)
+#     completed_runs = sorted(resultsdir.glob("run_*.h5"))
+#
+#     load_domains = {
+#         "elec": "Electricity Load",
+#         "dhw": "Hot Water Load",
+#         "sh": "Heating Load",
+#     }
+#
+#     dt_hours = 1 / 60  # minutely resolution
+#
+#     rows = []
+#     for run in tqdm(
+#         completed_runs,
+#         desc="Checking timeseries",
+#         unit="run",
+#     ):
+#
+#         ts = pd.read_hdf(run, key="timeseries")
+#         params = pd.read_hdf(run, key="params").iloc[0]
+#         n_persons = params["n_persons"]
+#
+#         if isinstance(n_persons, str):
+#             n_persons = ast.literal_eval(n_persons)
+#
+#         total_persons = sum(n_persons)
+#         a_ref = float(params["a_ref"])
+#
+#         numeric_ts = ts.select_dtypes(include="number")
+#
+#         res = {
+#             "run_id": run.stem,
+#             "nan_vals": ts.isna().any().any(),
+#             "neg_load_vals": (ts[["Electricity Load","Hot Water Load","Heating Load",]] < 0).any().any(),
+#             "total_persons": total_persons,
+#             "a_ref": a_ref,
+#         }
+#
+#         night_mask = (ts.index.hour >= 1) & (ts.index.hour < 5)
+#         for prefix, col in load_domains.items():
+#             load = ts[col]
+#
+#             night_load = load.loc[night_mask]
+#
+#             annual_energy = load.sum() * dt_hours
+#             res.update({
+#                 f"{prefix}_sum_yearly": annual_energy,
+#                 f"{prefix}_sum_yearly_per_occ": annual_energy / total_persons,
+#                 f"{prefix}_sum_yearly_per_a_ref": annual_energy / a_ref,
+#                 f"{prefix}_max":load.max(),
+#                 f"{prefix}_min":load.min(),
+#                 f"{prefix}_mean":load.mean(),
+#                 f"{prefix}_p05": load.quantile(0.05),
+#                 f"{prefix}_p10": load.quantile(0.10),
+#                 f"{prefix}_p95":load.quantile(0.95),
+#                 f"{prefix}_p99": load.quantile(0.99),
+#                 f"{prefix}_mean_01_05": night_load.mean(),
+#             })
+#
+#             daily = load.groupby(load.index.date)
+#             daily_stats = {
+#                 "max": daily.max(),
+#                 "min": daily.min(),
+#                 "mean": daily.mean(),
+#                 "p05": daily.quantile(0.05),
+#                 "p10": daily.quantile(0.10),
+#                 "p95": daily.quantile(0.95),
+#                 "p99": daily.quantile(0.99),
+#             }
+#
+#             res[f"{prefix}_load_factor"] = load.mean() / load.max() if load.max() > 0 else np.nan
+#
+#             daily_peak = daily.max()
+#             res[f"{prefix}_daily_load_factor_avg"] = (
+#                 (daily.mean() / daily_peak).where(daily_peak > 0).mean()
+#             )
+#
+#             for name, s in daily_stats.items():
+#                 res[f"{prefix}_daily_{name}_avg"] = s.mean()
+#                 res[f"{prefix}_daily_{name}_std"] = s.std()
+#
+#         if "T" in ts.columns:
+#             temp = ts["T"]
+#
+#             res.update({
+#                 "temperature_mean": temp.mean(),
+#                 "temperature_min":temp.min(),
+#                 "temperature_max":temp.max(),
+#                 "temperature_p05":temp.quantile(0.05),
+#                 "temperature_p95":temp.quantile(0.95),
+#             })
+#
+#
+#
+#
+#         for col in [
+#             "buildingType",
+#             "buildingAgeBin",
+#             "surrounding",
+#             "climateRegion",
+#             "year_type",
+#             "future",
+#             "seed",
+#             "state_seed",
+#         ]:
+#             if col in params.index:
+#                 res[col] = params[col]
+#
+#         rows.append(res)
+#
+#     return pd.DataFrame(rows)
+
+# def check_timeseries(resultsdir) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+#
+#     resultsdir = Path(resultsdir)
+#     completed_runs = sorted(resultsdir.glob("run_*.h5"))
+#
+#     load_domains = {
+#         "elec": "Electricity Load",
+#         "dhw": "Hot Water Load",
+#         "sh": "Heating Load",
+#     }
+#
+#     col_to_prefix = {col: prefix for prefix, col in load_domains.items()}
+#     dt_hours = 1 / 60  # minutely resolution
+#
+#     overall_rows = []
+#     daily_rows = []
+#     hourly_rows = []
+#     for run in tqdm(completed_runs,unit="run"):
+#         ts = pd.read_hdf(run, key="timeseries")
+#         params = pd.read_hdf(run, key="params").iloc[0]
+#         n_persons = params["n_persons"]
+#
+#         if isinstance(n_persons, str):
+#             n_persons = ast.literal_eval(n_persons)
+#
+#         total_persons = sum(n_persons)
+#         a_ref = float(params["a_ref"])
+#
+#         res = {
+#             "run_id": run.stem,
+#             "nan_vals": ts.isna().any().any(),
+#             "neg_load_vals": (ts[list(load_domains.values())]  < 0).any().any(),
+#             "total_persons": total_persons,
+#             "a_ref": a_ref,
+#         }
+#         daily_res = {"run_id": run.stem}
+#
+#         offday = ts["Off Day"].astype(bool).groupby(ts.index.date).max()
+#         day_masks = {"": None, "weekday_": ~offday, "offday_": offday}
+#         night_mask = (ts.index.hour >= 1) & (ts.index.hour < 5)
+#         for prefix, col in load_domains.items():
+#             load = ts[col]
+#             night_load = load.loc[night_mask]
+#             annual_energy = load.sum() * dt_hours
+#             res.update({
+#                 f"{prefix}_sum_yearly": annual_energy,
+#                 f"{prefix}_sum_yearly_per_occ": annual_energy / total_persons,
+#                 f"{prefix}_sum_yearly_per_a_ref": annual_energy / a_ref,
+#                 f"{prefix}_max":load.max(),
+#                 f"{prefix}_min":load.min(),
+#                 f"{prefix}_mean":load.mean(),
+#                 f"{prefix}_p05": load.quantile(0.05),
+#                 f"{prefix}_p10": load.quantile(0.10),
+#                 f"{prefix}_p95":load.quantile(0.95),
+#                 f"{prefix}_p99": load.quantile(0.99),
+#                 f"{prefix}_mean_01_05": night_load.mean(),
+#                 f"{prefix}_load_factor": load.mean() / load.max() if load.max() > 0 else np.nan,
+#             })
+#
+#             half = load.resample("30min").mean()
+#             res[f"{prefix}_tou"], res[f"{prefix}_tou_share"] = tou_parameter(half)
+#             winter_months = [10, 11, 12, 1, 2, 3]
+#             winter = half.index.month.isin(winter_months)
+#             res[f"{prefix}_tou_winter"], res[f"{prefix}_tou_winter_share"] = tou_parameter(half[winter])
+#             res[f"{prefix}_tou_summer"], res[f"{prefix}_tou_summer_share"] = tou_parameter(half[~winter])
+#
+#             daily = load.groupby(load.index.date)
+#             daily_max, daily_mean = daily.max(), daily.mean()
+#             daily_stats = {
+#                 "max": daily_max,
+#                 "min": daily.min(),
+#                 "mean": daily_mean,
+#                 "p05": daily.quantile(0.05),
+#                 "p10": daily.quantile(0.10),
+#                 "p95": daily.quantile(0.95),
+#                 "p99": daily.quantile(0.99),
+#                 "load_factor": (daily_mean / daily_max).where(daily_max > 0),
+#             }
+#
+#             unocc = peaks_without_occupancy(load, ts["Occupancy Home Active"], prominence=0.10, plat_min_abs=0.05)
+#             res.update({f"{prefix}_{k}": v for k, v in unocc.items()})
+#
+#             pps = peak_plateau_ramp_stats(load)
+#             all_daily = {**daily_stats, **{f"{k}": v for k, v in pps.items()}}
+#
+#             for label, mask in day_masks.items():
+#                 for name, s in all_daily.items():
+#                     if mask is not None:
+#                         s = s[mask.loc[s.index]]
+#                     daily_res[f"{prefix}_{label}daily_{name}_avg"] = s.mean()
+#                     daily_res[f"{prefix}_{label}daily_{name}_std"] = s.std()
+#                 n_days = len(pps) if mask is None else int(mask.loc[pps.index].sum())
+#                 daily_res[f"{prefix}_{label}active_days"] = n_days
+#
+#         if "T" in ts.columns:
+#             temp = ts["T"]
+#
+#             res.update({
+#                 "temperature_mean": temp.mean(),
+#                 "temperature_min":temp.min(),
+#                 "temperature_max":temp.max(),
+#                 "temperature_p05":temp.quantile(0.05),
+#                 "temperature_p95":temp.quantile(0.95),
+#             })
+#
+#
+#         for col in [
+#             "buildingType",
+#             "buildingAgeBin",
+#             "surrounding",
+#             "climateRegion",
+#             "year_type",
+#             "future",
+#             "seed",
+#             "state_seed",
+#         ]:
+#             if col in params.index:
+#                 res[col] = params[col]
+#
+#         occ = ts["Occupancy Home Active"]
+#         g = occ.groupby(occ.index.date)
+#         days_never_zero = int((g.min() > 0).sum())
+#         days_always_zero = int((g.max() == 0).sum())
+#
+#
+#
+#         res.update({
+#             "occ_days_never_zero": days_never_zero,
+#             "occ_days_always_zero": days_always_zero,
+#         })
+#
+#         overall_rows.append(res)
+#         daily_rows.append(daily_res)
+#
+#         hourly_res = {"run_id": run.stem}
+#         day_type = np.where(ts["Off Day"].astype(bool), "offday", "weekday")
+#         profile = (
+#             ts[list(load_domains.values())]
+#             .rename(columns=col_to_prefix)
+#             .groupby([day_type, ts.index.hour])
+#             .mean()
+#         )
+#         for (dtype, hour), row in profile.iterrows():
+#             for prefix, value in row.items():
+#                 hourly_res[f"{prefix}_{dtype}_h{hour:02d}"] = value
+#         hourly_rows.append(hourly_res)
+#
+#     return pd.DataFrame(overall_rows), pd.DataFrame(daily_rows), pd.DataFrame(hourly_rows)
+
+
+OCC_COL = "Occupancy Home Active"
+OFFDAY_COL = "Off Day"
+WINTER_MONTHS = [10, 11, 12, 1, 2, 3]
+PARAM_COLS = ["buildingType", "buildingAgeBin", "surrounding", "climateRegion","year_type", "future", "seed", "state_seed"]
+DT_HOURS = 1 / 60
+
+def _run_info(run, ts, params, load_cols, total_persons, a_ref) -> dict:
+    occ = ts[OCC_COL]
+    g = occ.groupby(occ.index.date)
+    info = {
+        "run_id": run.stem,
+        "nan_vals": ts.isna().any().any(),
+        "neg_load_vals": (ts[load_cols] < 0).any().any(),
+        "total_persons": total_persons,
+        "a_ref": a_ref,
+        "occ_days_never_zero": int((g.min() > 0).sum()),
+        "occ_days_always_zero": int((g.max() == 0).sum()),
+    }
+    if "T" in ts.columns:
+        temp = ts["T"]
+        info.update({
+            "temperature_mean": temp.mean(),
+            "temperature_min": temp.min(),
+            "temperature_max": temp.max(),
+            "temperature_p05": temp.quantile(0.05),
+            "temperature_p95": temp.quantile(0.95),
+        })
+    info.update({c: params[c] for c in PARAM_COLS if c in params.index})
+    return info
+
+def _yearly_stats(load, occ, total_persons, a_ref) -> dict:
+    night = load[(load.index.hour >= 1) & (load.index.hour < 5)]
+    annual_energy = load.sum() * DT_HOURS
+    n_days = load.index.normalize().nunique()
+    res = {
+        "sum_yearly": annual_energy,
+        "sum_yearly_per_occ": annual_energy / total_persons,
+        "sum_yearly_per_a_ref": annual_energy / a_ref,
+        "max": load.max(),
+        "min": load.min(),
+        "mean": load.mean(),
+        "p05": load.quantile(0.05),
+        "p10": load.quantile(0.10),
+        "p95": load.quantile(0.95),
+        "p99": load.quantile(0.99),
+        "mean_01_05": night.mean(),
+        "load_factor": load.mean() / load.max() if load.max() > 0 else np.nan,
+    }
+
+    half = load.resample("30min").mean()
+    winter = half.index.month.isin(WINTER_MONTHS)
+    for label, series in {"": half, "_winter": half[winter], "_summer": half[~winter]}.items():
+        res[f"tou{label}"], res[f"tou{label}_share"] = tou_parameter(series)
+
+    unocc = peaks_without_occupancy(load, occ, prominence=0.075, plat_min_abs=0.05)
+    res.update(unocc)
+
+    return res
+
+def _daily_stats(load, offday) -> list[dict]:
+    g = load.groupby(load.index.date) #equivalent to resample D
+    d_max, d_mean = g.max(), g.mean()
+    pps = peak_plateau_ramp_stats(load)
+    all_daily = {
+        "max": d_max,
+        "min": g.min(),
+        "mean": d_mean,
+        "p05": g.quantile(0.05),
+        "p10": g.quantile(0.10),
+        "p95": g.quantile(0.95),
+        "p99": g.quantile(0.99),
+        "load_factor": (d_mean / d_max).where(d_max > 0),
+        **{k: v for k, v in pps.items()},
+    }
+
+    rows = []
+    for day_type, mask in {"all": None, "weekday": ~offday, "offday": offday}.items():
+        row = {"day_type": day_type}
+        for name, s in all_daily.items():
+            if mask is not None:
+                s = s[mask.loc[s.index]]
+            row[f"{name}_avg"] = s.mean()
+            row[f"{name}_std"] = s.std()
+        row["active_days"] = len(pps) if mask is None else int(mask.loc[pps.index].sum())
+        rows.append(row)
+    return rows
+
+def _hourly_profile(load, offday_minutes) -> list[dict]:
+    groups = {
+        "all": load,
+        "weekday": load[~offday_minutes],
+        "offday": load[offday_minutes],
+    }
+    rows = []
+    for day_type, s in groups.items():
+        profile = s.groupby(s.index.hour).mean()
+        rows.append({"day_type": day_type, **{f"h{h:02d}": v for h, v in profile.items()}})
+    return rows
+
+# def check_timeseries_new(resultsdir) -> dict[str, pd.DataFrame]:
+#     resultsdir = Path(resultsdir)
+#     completed_runs = sorted(resultsdir.glob("run_*.h5"))
+#
+#     load_domains = {
+#         "elec": "Electricity Load",
+#         "dhw": "Hot Water Load",
+#         "sh": "Heating Load",
+#     }
+#
+#     runs, yearly, daily, hourly = [], [], [], []
+#     for run in tqdm(completed_runs, unit="run"):
+#         ts = pd.read_hdf(run, key="timeseries")
+#         params = pd.read_hdf(run, key="params").iloc[0]
+#
+#         n_persons = params["n_persons"]
+#         if isinstance(n_persons, str):
+#             n_persons = ast.literal_eval(n_persons)
+#         total_persons = sum(n_persons)
+#         a_ref = float(params["a_ref"])
+#
+#         runs.append(_run_info(run, ts, params, list(load_domains.values()), total_persons, a_ref))
+#
+#         offday_minutes = ts[OFFDAY_COL].astype(bool)
+#         offday = offday_minutes.groupby(ts.index.date).max()
+#         occ = ts[OCC_COL]
+#
+#         for domain, col in load_domains.items():
+#             load = ts[col]
+#             key = {"run_id": run.stem, "domain": domain}
+#
+#             yearly.append({**key, **_yearly_stats(load, occ, total_persons, a_ref)})
+#             daily.extend({**key, **row} for row in _daily_stats(load, offday))
+#             hourly.extend({**key, **row} for row in _hourly_profile(load, offday_minutes))
+#
+#     return {
+#         "runs": pd.DataFrame(runs),
+#         "yearly": pd.DataFrame(yearly),
+#         "daily": pd.DataFrame(daily),
+#         "hourly": pd.DataFrame(hourly),
+#     }
+
+
+
+import pickle
+from joblib import Parallel, delayed
+
+LOAD_DOMAINS = {
+    "elec": "Electricity Load",
+    "dhw": "Hot Water Load",
+    "sh": "Heating Load",
+}
+
+
+def process_run(run: Path) -> dict:
+    ts = pd.read_hdf(run, key="timeseries")
+    params = pd.read_hdf(run, key="params").iloc[0]
+
+    n_persons = params["n_persons"]
+    if isinstance(n_persons, str):
+        n_persons = ast.literal_eval(n_persons)
+    total_persons = sum(n_persons)
+    a_ref = float(params["a_ref"])
+
+    offday_minutes = ts[OFFDAY_COL].astype(bool)
+    offday = offday_minutes.groupby(ts.index.date).max()
+    occ = ts[OCC_COL]
+
+    out = {
+        "runs": _run_info(run, ts, params, list(LOAD_DOMAINS.values()), total_persons, a_ref),
+        "yearly": [],
+        "daily": [],
+        "hourly": [],
+    }
+    for domain, col in LOAD_DOMAINS.items():
+        load = ts[col]
+        key = {"run_id": run.stem, "domain": domain}
+        out["yearly"].append({**key, **_yearly_stats(load, occ, total_persons, a_ref)})
+        out["daily"].extend({**key, **row} for row in _daily_stats(load, offday))
+        out["hourly"].extend({**key, **row} for row in _hourly_profile(load, offday_minutes))
+    return out
+
+
+def process_run_cached(run: Path, cache_dir) -> dict:
+    cache_file = Path(cache_dir) / f"{run.stem}.pkl" if cache_dir else None
+    if cache_file is not None and cache_file.exists():
+        with open(cache_file, "rb") as f:
+            return pickle.load(f)
+    try:
+        out = process_run(run)
+    except Exception as e:
+        return {"error": {"run_id": run.stem, "error": repr(e)}}
+    if cache_file is not None:
+        with open(cache_file, "wb") as f:
+            pickle.dump(out, f)
+    return out
+
+
+def check_timeseries(resultsdir, n_jobs=-1, cache_dir=None) -> dict[str, pd.DataFrame]:
+    resultsdir = Path(resultsdir)
+    completed_runs = sorted(resultsdir.glob("run_*.h5"))
+    if cache_dir is not None:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+    results = Parallel(n_jobs=n_jobs, return_as="generator")(
+        delayed(process_run_cached)(run, cache_dir) for run in completed_runs
+    )
+    results = list(tqdm(results, total=len(completed_runs), unit="run"))
+
+    ok = [r for r in results if "error" not in r]
+    failed = [r["error"] for r in results if "error" in r]
+
+    return {
+        "runs": pd.DataFrame([r["runs"] for r in ok]),
+        "yearly": pd.DataFrame([row for r in ok for row in r["yearly"]]),
+        "daily": pd.DataFrame([row for r in ok for row in r["daily"]]),
+        "hourly": pd.DataFrame([row for r in ok for row in r["hourly"]]),
+        "failed": pd.DataFrame(failed),
+    }
+
+
+
+def check_timeseries_alt(resultsdir) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
 
     resultsdir = Path(resultsdir)
     completed_runs = sorted(resultsdir.glob("run_*.h5"))
@@ -295,15 +781,13 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
         "sh": "Heating Load",
     }
 
+    col_to_prefix = {col: prefix for prefix, col in load_domains.items()}
     dt_hours = 1 / 60  # minutely resolution
 
-    rows = []
-    for run in tqdm(
-        completed_runs,
-        desc="Checking timeseries",
-        unit="run",
-    ):
-
+    overall_rows = []
+    daily_rows = []
+    hourly_rows = []
+    for run in tqdm(completed_runs,unit="run"):
         ts = pd.read_hdf(run, key="timeseries")
         params = pd.read_hdf(run, key="params").iloc[0]
         n_persons = params["n_persons"]
@@ -314,22 +798,21 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
         total_persons = sum(n_persons)
         a_ref = float(params["a_ref"])
 
-        numeric_ts = ts.select_dtypes(include="number")
-
         res = {
             "run_id": run.stem,
             "nan_vals": ts.isna().any().any(),
-            "neg_load_vals": (ts[["Electricity Load","Hot Water Load","Heating Load",]] < 0).any().any(),
+            "neg_load_vals": (ts[list(load_domains.values())]  < 0).any().any(),
             "total_persons": total_persons,
             "a_ref": a_ref,
         }
+        daily_res = {"run_id": run.stem}
 
+        offday = ts["Off Day"].astype(bool).groupby(ts.index.date).max()
+        day_masks = {"": None, "weekday_": ~offday, "offday_": offday}
         night_mask = (ts.index.hour >= 1) & (ts.index.hour < 5)
         for prefix, col in load_domains.items():
             load = ts[col]
-
             night_load = load.loc[night_mask]
-
             annual_energy = load.sum() * dt_hours
             res.update({
                 f"{prefix}_sum_yearly": annual_energy,
@@ -343,29 +826,43 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
                 f"{prefix}_p95":load.quantile(0.95),
                 f"{prefix}_p99": load.quantile(0.99),
                 f"{prefix}_mean_01_05": night_load.mean(),
+                f"{prefix}_load_factor": load.mean() / load.max() if load.max() > 0 else np.nan,
             })
 
+            half = load.resample("30min").mean()
+            res[f"{prefix}_tou"], res[f"{prefix}_tou_share"] = tou_parameter(half)
+            winter_months = [10, 11, 12, 1, 2, 3]
+            winter = half.index.month.isin(winter_months)
+            res[f"{prefix}_tou_winter"], res[f"{prefix}_tou_winter_share"] = tou_parameter(half[winter])
+            res[f"{prefix}_tou_summer"], res[f"{prefix}_tou_summer_share"] = tou_parameter(half[~winter])
+
             daily = load.groupby(load.index.date)
+            daily_max, daily_mean = daily.max(), daily.mean()
             daily_stats = {
-                "max": daily.max(),
+                "max": daily_max,
                 "min": daily.min(),
-                "mean": daily.mean(),
+                "mean": daily_mean,
                 "p05": daily.quantile(0.05),
                 "p10": daily.quantile(0.10),
                 "p95": daily.quantile(0.95),
                 "p99": daily.quantile(0.99),
+                "load_factor": (daily_mean / daily_max).where(daily_max > 0),
             }
 
-            res[f"{prefix}_load_factor"] = load.mean() / load.max() if load.max() > 0 else np.nan
+            unocc = peaks_without_occupancy(load, ts["Occupancy Home Active"], prominence=0.075, plat_min_abs=0.05)
+            res.update({f"{prefix}_{k}": v for k, v in unocc.items()})
 
-            daily_peak = daily.max()
-            res[f"{prefix}_daily_load_factor_avg"] = (
-                (daily.mean() / daily_peak).where(daily_peak > 0).mean()
-            )
+            pps = peak_plateau_ramp_stats(load)
+            all_daily = {**daily_stats, **{f"{k}": v for k, v in pps.items()}}
 
-            for name, s in daily_stats.items():
-                res[f"{prefix}_daily_{name}_avg"] = s.mean()
-                res[f"{prefix}_daily_{name}_std"] = s.std()
+            for label, mask in day_masks.items():
+                for name, s in all_daily.items():
+                    if mask is not None:
+                        s = s[mask.loc[s.index]]
+                    daily_res[f"{prefix}_{label}daily_{name}_avg"] = s.mean()
+                    daily_res[f"{prefix}_{label}daily_{name}_std"] = s.std()
+                n_days = len(pps) if mask is None else int(mask.loc[pps.index].sum())
+                daily_res[f"{prefix}_{label}active_days"] = n_days
 
         if "T" in ts.columns:
             temp = ts["T"]
@@ -377,8 +874,6 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
                 "temperature_p05":temp.quantile(0.05),
                 "temperature_p95":temp.quantile(0.95),
             })
-
-
 
 
         for col in [
@@ -394,9 +889,106 @@ def check_timeseries(resultsdir) -> pd.DataFrame:
             if col in params.index:
                 res[col] = params[col]
 
-        rows.append(res)
+        occ = ts["Occupancy Home Active"]
+        g = occ.groupby(occ.index.date)
+        days_never_zero = int((g.min() > 0).sum())
+        days_always_zero = int((g.max() == 0).sum())
 
-    return pd.DataFrame(rows)
+
+
+        res.update({
+            "occ_days_never_zero": days_never_zero,
+            "occ_days_always_zero": days_always_zero,
+        })
+
+        overall_rows.append(res)
+        daily_rows.append(daily_res)
+
+        hourly_res = {"run_id": run.stem}
+        day_type = np.where(ts["Off Day"].astype(bool), "offday", "weekday")
+        profile = (
+            ts[list(load_domains.values())]
+            .rename(columns=col_to_prefix)
+            .groupby([day_type, ts.index.hour])
+            .mean()
+        )
+        for (dtype, hour), row in profile.iterrows():
+            for prefix, value in row.items():
+                hourly_res[f"{prefix}_{dtype}_h{hour:02d}"] = value
+        hourly_rows.append(hourly_res)
+
+    return pd.DataFrame(overall_rows), pd.DataFrame(daily_rows), pd.DataFrame(hourly_rows)
+
+def tou_parameter(half_hourly):
+    g = half_hourly.groupby(half_hourly.index.date)
+    active = g.max() > 0
+    peak_ts = g.idxmax()[active]
+    if peak_ts.empty:
+        return np.nan, np.nan
+    j = peak_ts.dt.hour * 2 + peak_ts.dt.minute // 30 + 1
+    mode = j.mode().min()
+    return mode, (j == mode).mean()
+
+def find_peak_plats(data, prominence=0.075, plat_tolerance=0.01, plat_min_level=0.10,plat_min_abs=0.05, plat_min_steps=10):
+    peak = data.max()
+    peak_idx, _ = find_peaks(data.values, prominence=prominence * peak, height=plat_min_abs)
+    rol_max = data.rolling(plat_min_steps, center=True,min_periods=1).max()
+    rol_min = data.rolling(plat_min_steps, center=True,min_periods=1).min()
+    rol_mean = data.rolling(plat_min_steps, center=True,min_periods=1).mean()
+    min_level = max(peak * plat_min_level,plat_min_abs)
+    plat = (((rol_max - rol_min) <= rol_mean * plat_tolerance) & (rol_min > min_level))
+    block = (plat != plat.shift()).cumsum()
+    plat_len = plat.groupby(block).transform("size")
+    plat_valid = plat & (plat_len >= plat_min_steps)
+    return peak_idx, plat_valid, block, min_level
+
+def peak_plateau_ramp_stats(load,freq = "1min",prominence = 0.075,  plat_tolerance = 0.01,      plat_min_level = 0.10,plat_min_abs = 0.05,    plat_min_steps = 10,min_day_level=0.05):
+
+    data = load.resample(freq).mean()
+    peak = data.max()
+    dates = data.index.date
+
+    day_max = data.groupby(dates).max()
+    active_days = day_max.index[day_max >= max(min_day_level * peak, plat_min_abs)]
+
+    peak_idx, plat_valid, block, _ = find_peak_plats(data, prominence, plat_tolerance, plat_min_level, plat_min_abs, plat_min_steps)
+    peaks = (pd.Series(dates[peak_idx]).value_counts().reindex(active_days, fill_value=0).rename("peaks"))
+    runs = (
+        pd.DataFrame({"valid": plat_valid, "t": data.index})
+        .groupby(block.values)
+        .agg(valid=("valid", "first"), start=("t", "first"), n=("valid", "size"))
+    )
+    runs = runs[runs["valid"]]
+    plateaus = runs.groupby(runs["start"].dt.date)["n"].agg(plateaus="size", plateau_dur_mean="mean", plateau_dur_max="max")
+
+    ramp = data.diff()
+    ramps = pd.DataFrame({
+        "ramp_abs_mean": ramp.abs().groupby(dates).mean(),
+        "ramp_abs_p95": ramp.abs().groupby(dates).quantile(0.95),
+        "ramp_up_max": ramp.groupby(dates).max(),
+        "ramp_down_max": ramp.groupby(dates).min(),
+    })
+
+    daily = pd.concat([peaks, plateaus.reindex(active_days), ramps.reindex(active_days)], axis=1)
+    daily["plateaus"] = daily["plateaus"].fillna(0)
+    return daily
+
+def peaks_without_occupancy(load, occ, freq="1min", prominence=0.075, plat_min_abs=0.05):
+    data = load.resample(freq).mean()
+    peak_idx, *_ = find_peak_plats(data, prominence=prominence, plat_min_abs=plat_min_abs)
+
+    occ_r = occ.resample(freq).max()
+    occ_r = occ_r.rolling(2 * 2 + 1, center=True, min_periods=1).max() #margin 2 to the löeft and right
+    peak_ts = data.index[peak_idx]
+    unoccupied = occ_r.reindex(peak_ts).to_numpy() == 0
+
+    peak_days = pd.Series(peak_ts.date)
+    return {
+        "peaks_unocc": int(unoccupied.sum()),
+        "days_peak_unocc": peak_days[unoccupied].nunique(),
+        "share_peaks_unocc": unoccupied.mean() if len(peak_ts) else np.nan,
+    }
+
 
 def check_duplicate_timeseries(manifest):
     duped_list = manifest["apartment_seeds"].duplicated(keep=False).any()
