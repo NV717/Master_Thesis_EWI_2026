@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib>=3.11.1",
     "numpy>=2.5.1",
     "pandas>=3.0.5",
+    "pingouin>=0.7.0",
     "polars>=2.0.0",
     "pyarrow>=25.0.1",
     "scikit-learn>=1.9.0",
@@ -29,6 +30,7 @@ dependencies = [
     "torchmetrics>=1.9.0",
     "torchvision",
     "tqdm>=4.70.0",
+    "tsfeatures>=0.4.5",
     "wandb>=0.30.0",
 ]
 

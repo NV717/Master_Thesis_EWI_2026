@@ -7,6 +7,7 @@ from collections import Counter
 import numpy as np
 import ast
 import seaborn as sns
+from Ch_1_Data_Preparation.DataPreparationHelper import *
 TYPES = ["SFH", "TH", "MFH", "AB"]
 COLOR_DICT = {"SFH": "#2f6db5", "TH": "#e69f00", "MFH": "#2a9d8f", "AB": "#c44e52"}
 
@@ -291,6 +292,8 @@ def scatter_specific_energy_by_building_type(
 
     fig.tight_layout(rect=(0, 0, 1, 0.88))
 
+# weather data
+
 def load_TRY_files(try_path):
     dirs = {}
     for year in [2015, 2045]:
@@ -468,6 +471,8 @@ def boxplot_TRY(mean_df):
 
     g.figure.subplots_adjust(top=0.85)
     plt.show()
+
+# Appliances
 
 def plot_appliance_ownership_total(manifest):
     manifest = manifest.copy()
@@ -819,3 +824,175 @@ def calculate_group_shares(apartments):
         shares[f"share_{group}"] = (counts[group] / maximum if maximum > 0 else float("nan"))
 
     return pd.Series(shares)
+
+# Correlation
+def avg_corr(data, offday=2):
+    data_offday = data.xs(offday, level="offday")
+    #fisher z transform
+    z = np.arctanh(data_offday.clip(-1 + 1e-12, 1 - 1e-12))
+    mean_z = z.groupby(level=["buildingType","freq", "resid", "variable"],sort=False).mean()
+    mean_corr_fisher = np.tanh(mean_z)
+    std_corr = data_offday.groupby(level=["buildingType","freq", "resid", "variable"], sort=False).std()
+    n_corr = data_offday.groupby(level=["buildingType","freq", "resid", "variable"], sort=False).count()
+    mean_corr = mean_corr_fisher.reindex(data.columns, level="variable")
+    std_corr = std_corr.reindex(data.columns, level="variable")
+    n_corr = n_corr.reindex(data.columns, level="variable")
+    return mean_corr, std_corr, n_corr
+
+def avg_partial_corr(data, offday=2):
+    data = data.xs(offday, level="offday")
+    #fisher z transform
+    z = np.arctanh(data["r"].clip(-1 + 1e-12, 1 - 1e-12))
+    levels = ["buildingType", "freq", "resid", "comparison"]
+    grouped = z.groupby(level=levels, sort=False)
+    result = pd.DataFrame({
+        "r_mean": np.tanh(grouped.mean()),
+        "r_std_z": grouped.std(),
+        "n_runs": grouped.count(),
+    })
+    return result
+
+
+def plot_corr_matrices(mean_corr, std_corr, n_corr, freq="1min", resid=False, show_std=False):
+    levels = ("freq", "resid")
+    selected_mean = mean_corr.xs((freq, resid), level=levels)
+    selected_std = std_corr.xs((freq, resid), level=levels)
+    selected_n = n_corr.xs((freq, resid), level=levels)
+
+    building_types = selected_mean.index.get_level_values("buildingType").unique()
+
+    labels = {
+        "Electricity Load": "Electricity",
+        "Hot Water Load": "Hot Water",
+        "Heating Load": "Heating",
+        "Occupancy Home Active": "Home Active",
+        "Occupancy Home Not Active": "Home Inactive",
+        "T": "Temperature",
+    }
+
+    n = len(building_types)
+    ncols = min(2, n)
+    nrows = int(np.ceil(n / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 5.5 * nrows), squeeze=False, layout="constrained")
+
+    axes = axes.flatten()
+    for ax, building_type in zip(axes, building_types):
+        mean = selected_mean.xs(building_type, level="buildingType")
+        std = selected_std.xs(building_type, level="buildingType")
+        counts = selected_n.xs(building_type, level="buildingType")
+
+        variables = mean.columns
+        mean = mean.reindex(index=variables, columns=variables)
+        std = std.reindex(index=variables, columns=variables)
+        counts = counts.reindex(index=variables, columns=variables)
+
+        n_min = int(counts.min().min())
+        n_max = int(counts.max().max())
+
+        n_label = (f"n = {n_min}" if n_min == n_max else f"n = {n_min}–{n_max}")
+
+        annot = pd.DataFrame("", index=variables, columns=variables)
+
+        for row in variables:
+            for col in variables:
+                r = mean.loc[row, col]
+                s = std.loc[row, col]
+
+                if pd.isna(r):
+                    continue
+
+                if show_std and pd.notna(s):
+                    annot.loc[row, col] = f"{r:.2f}\n±{s:.2f}"
+                else:
+                    annot.loc[row, col] = f"{r:.2f}"
+
+        mask = np.triu(np.ones(mean.shape, dtype=bool), k=1)
+
+        mean = mean.rename(index=labels, columns=labels)
+        sns.heatmap(
+            mean,
+            mask=mask,
+            annot=annot.to_numpy(),
+            fmt="",
+            ax=ax,
+            cmap="RdBu_r",
+            vmin=-1,
+            vmax=1,
+            center=0,
+            square=True,
+            cbar=False,
+            linewidths=0.5,
+            linecolor="white",
+            annot_kws={"fontsize": 9},
+        )
+
+        ax.set_title(f"{building_type} ({n_label})", fontsize=13, fontweight="bold", pad=12)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.tick_params(axis="both", length=0, labelsize=10)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha="right")
+
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+
+    for ax in axes[n:]:
+        ax.set_visible(False)
+
+    sm = plt.cm.ScalarMappable(cmap="RdBu_r", norm=plt.Normalize(-1, 1))
+    fig.colorbar(sm, ax=axes[:n].tolist(), shrink=0.75, label="Mean Spearman correlation")
+    fig.suptitle(f"Average Correlation Matrices | {freq} | Residuals: {resid}", fontsize=15, fontweight="bold", )
+
+from itertools import product
+def lagged_corr(data,pairs,freq="1min",max_lag="60min",resid=False,Offday=2,method="spearman"):
+    df = prepare_corr_data(data, freq, resid, Offday)
+    step = pd.to_timedelta(freq)
+    max_lag_steps = int(pd.to_timedelta(max_lag) / step)
+
+    results = []
+    for (x, y), lag in product(pairs,range(-max_lag_steps, max_lag_steps + 1)):
+        shifted_y = df[y].shift(-lag)
+        valid = df[x].notna() & shifted_y.notna()
+        n = valid.sum()
+
+        r = (df.loc[valid, x].corr(shifted_y.loc[valid],method=method) if n >= 3 else np.nan)
+
+        results.append({
+            "x": x,
+            "y": y,
+            "lag_min": lag * step.total_seconds() / 60,
+            "r": r,
+            "n": n,
+        })
+
+    return pd.DataFrame(results)
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_lagged_corr(data):
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    data = data.copy()
+    data["pair"] = data["x"] + " -> " + data["y"]
+
+    sns.lineplot(
+        data=data,
+        x="lag_min",
+        y="r",
+        hue="pair",
+        palette="Dark2",
+        ax=ax,
+    )
+
+    ax.axvline(0, color="black", linestyle="--", alpha=0.5)
+    ax.axhline(0, color="grey", linewidth=0.8)
+
+    ax.set_xlabel("Lag (minutes)")
+    ax.set_ylabel("Spearman correlation")
+    ax.set_ylim(-1, 1)
+    ax.set_title("Lagged Cross-Correlations")
+
+    ax.legend(title="Variable pair", bbox_to_anchor=(1.02, 1))
+    ax.grid(alpha=0.2)
+
+    return fig, ax
