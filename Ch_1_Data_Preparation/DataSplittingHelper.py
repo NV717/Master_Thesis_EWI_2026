@@ -27,11 +27,15 @@ def remove_daylightsaving(ts):
         ts = ts.reindex(grid).interpolate(method="time", limit_direction="both")
     return ts
 
+def season_channels(index):
+    frac = (index.dayofyear - 1 + (index.hour * 60 + index.minute) / 1440) / 365.25
+    ang = 2 * np.pi * frac.to_numpy()
+    return np.stack([np.sin(ang), np.cos(ang)]).astype(np.float32)
 
 class h5Dataset(IterableDataset):
     def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_scaler,condition_scaler, target_norm,condition_norm,
                  static_by_run_id,aggregation,resolution=None,shufflefiles=False,
-                 shufflewindows=True, buffer_size=0):
+                 shufflewindows=True, buffer_size=0,context_steps=0, context_dropout=0.0, context_noise=0.0, use_season=False,context_reverse=False):
         super().__init__()
         self.files = list(files)
         self.run_ids = list(rund_ids)
@@ -50,6 +54,11 @@ class h5Dataset(IterableDataset):
         self.aggregation = aggregation
         self.target_norm = target_norm
         self.condition_norm = condition_norm
+        self.context_steps = context_steps
+        self.context_dropout = context_dropout
+        self.context_noise = context_noise
+        self.use_season = use_season
+        self.context_reverse = context_reverse
 
         if len(self.files) != len(self.run_ids):
             raise ValueError("input doesnt have same length")
@@ -71,8 +80,24 @@ class h5Dataset(IterableDataset):
 
         target = ts[self.gen_cols].to_numpy(dtype=np.float32, copy=False).T
         condition = ts[self.cond_cols].to_numpy(dtype=np.float32, copy=False).T
+        season = season_channels(ts.index) if self.use_season else None
+        return target, condition,season
 
-        return target, condition
+    def _add_context(self, target, condition_window, start):
+        K = self.context_steps
+        if K == 0:
+            return condition_window
+        n = target.shape[0]
+        ctx = np.zeros((n + 1, self.window_length), dtype=np.float32)  # n target channels + 1 mask
+        if start >= K and random.random() >= self.context_dropout:
+            tail = target[:, start - K:start]  # clean, already scaled
+            if self.context_noise > 0:
+                tail = tail + self.context_noise * np.random.randn(*tail.shape).astype(np.float32)
+            if self.context_reverse:
+                tail = tail[:, ::-1]
+            ctx[:n, :K] = tail
+            ctx[n, :K] = 1.0
+        return np.concatenate([condition_window, ctx], axis=0)
 
     def __iter__(self):
         workers = get_worker_info()
@@ -87,7 +112,7 @@ class h5Dataset(IterableDataset):
         buffer = []
 
         for path, run_id in items:
-            target, condition = self._read_series(path)
+            target, condition, season = self._read_series(path)
             target = target / self.target_norm[run_id]
             condition = condition / self.condition_norm[run_id]
 
@@ -107,6 +132,9 @@ class h5Dataset(IterableDataset):
 
                 target_window = np.ascontiguousarray(target[:,start:end])
                 condition_window = np.ascontiguousarray(condition[:,start:end])
+                if season is not None:
+                    condition_window = np.concatenate([condition_window, season[:, start:end]], axis=0)
+                condition_window = self._add_context(target, condition_window, start)
 
                 sample = {
                     "target": torch.from_numpy(target_window),
@@ -167,7 +195,7 @@ class SampleWindowDataset(h5Dataset):
             items = items[w.id::w.num_workers]
 
         for path, run_id in items:
-            target, condition = self._read_series(path)
+            target, condition, season = self._read_series(path)
             if self.target_norm is not None:
                 target = target/ self.target_norm[run_id]
                 condition = condition/self.condition_norm[run_id]
@@ -182,6 +210,9 @@ class SampleWindowDataset(h5Dataset):
 
                 target_window = np.ascontiguousarray(target[:,start:end])
                 condition_window = np.ascontiguousarray(condition[:,start:end])
+                if season is not None:
+                    condition_window = np.concatenate([condition_window, season[:, start:end]], axis=0)
+                condition_window = self._add_context(target, condition_window, start)
 
                 sample = {
                     "row": row,
