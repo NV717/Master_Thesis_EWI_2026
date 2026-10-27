@@ -1,5 +1,6 @@
-Ch_1_Data_Preparation/Generation
+data/manifests
+data/raw
+data/split
+data/stats
 
-Ch_4_Diffusion/wandb
-
-DataSplit
+notebooks/wandb
