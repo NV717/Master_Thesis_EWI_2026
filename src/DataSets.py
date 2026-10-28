@@ -87,6 +87,30 @@ class h5Dataset(IterableDataset):
             ctx[n, :K] = 1.0
         return np.concatenate([condition_window, ctx], axis=0)
 
+    def _prepare_run(self, path, run_id):
+        target, condition, season = self._read_series(path)
+        target = apply_scaler(target / self.target_norm[run_id], self.target_scaler)
+        condition = apply_scaler(condition / self.condition_norm[run_id], self.condition_scaler)
+        return target, condition, season
+
+    def _make_sample(self, target, condition, season, run_id, start):
+        end = start + self.window_length
+        condition_window = np.ascontiguousarray(condition[:, start:end])
+        if season is not None:
+            condition_window = np.concatenate([condition_window, season[:, start:end]], axis=0)
+        condition_window = self._add_context(target, condition_window, start)
+        static = self.static_by_run_id[run_id]
+        return {
+            "target": torch.from_numpy(np.ascontiguousarray(target[:, start:end])),
+            "condition": torch.from_numpy(condition_window),
+            "static_cat": static["categorical"],
+            "static_cont": static["continuous"],
+            "static_bool": static["boolean"],
+            "target_norm": torch.from_numpy(self.target_norm[run_id]),
+            "condition_norm": torch.from_numpy(self.condition_norm[run_id]),
+        }
+
+
     def __iter__(self):
         workers = get_worker_info()
         items = list(zip(self.files, self.run_ids))
@@ -100,41 +124,14 @@ class h5Dataset(IterableDataset):
         buffer = []
 
         for path, run_id in items:
-            target, condition, season = self._read_series(path)
-            target = target / self.target_norm[run_id]
-            condition = condition / self.condition_norm[run_id]
+            target, condition, season = self._prepare_run(path, run_id)
 
-            # normalisierung basierend auf gewähltem scaler
-            target = apply_scaler(target, self.target_scaler)
-            condition = apply_scaler(condition, self.condition_scaler)
-
-            starts = list(range(0, target.shape[1] - self.window_length+ 1, self.stride))
-
+            starts = list(range(0, target.shape[1] - self.window_length + 1, self.stride))
             if self.shufflewindows:
                 random.shuffle(starts)
 
-            static = self.static_by_run_id[run_id]
-
             for start in starts:
-                end = start + self.window_length
-
-                target_window = np.ascontiguousarray(target[:,start:end])
-                condition_window = np.ascontiguousarray(condition[:,start:end])
-                if season is not None:
-                    condition_window = np.concatenate([condition_window, season[:, start:end]], axis=0)
-                condition_window = self._add_context(target, condition_window, start)
-
-                sample = {
-                    "target": torch.from_numpy(target_window),
-                    "condition": torch.from_numpy(condition_window),
-                    "static_cat": static["categorical"],
-                    "static_cont": static["continuous"],
-                    "static_bool": static["boolean"],
-                }
-
-
-                sample["target_norm"] = torch.from_numpy(self.target_norm[run_id])
-                sample["condition_norm"] = torch.from_numpy(self.condition_norm[run_id])
+                sample = self._make_sample(target, condition, season, run_id, start)
 
                 if self.buffer_size <= 0:
                     yield sample
@@ -177,40 +174,20 @@ class SampleWindowDataset(h5Dataset):
         return len(self.index)
 
     def __iter__(self):
-        items =list(zip(self.files, self.run_ids))
+        items = list(zip(self.files, self.run_ids))
         w = get_worker_info()
         if w is not None:
             items = items[w.id::w.num_workers]
 
         for path, run_id in items:
-            target, condition, season = self._read_series(path)
-            if self.target_norm is not None:
-                target = target/ self.target_norm[run_id]
-                condition = condition/self.condition_norm[run_id]
-            target = apply_scaler(target, self.target_scaler)
-            condition = apply_scaler(condition, self.condition_scaler)
+            target, condition, season = self._prepare_run(path, run_id)
+            runs = self.starts_per_run[run_id]
 
-            static = self.static_by_run_id[run_id]
-
-            for row, start in zip(self.starts_per_run[run_id].index,self.starts_per_run[run_id]["start_hour"]):
-                end = start + self.window_length
-                assert end <= target.shape[1], f"{run_id}: window {start}-{end} out of range"
-
-                target_window = np.ascontiguousarray(target[:,start:end])
-                condition_window = np.ascontiguousarray(condition[:,start:end])
-                if season is not None:
-                    condition_window = np.concatenate([condition_window, season[:, start:end]], axis=0)
-                condition_window = self._add_context(target, condition_window, start)
-
-                sample = {
-                    "row": row,
-                    "target": torch.from_numpy(target_window),
-                    "condition": torch.from_numpy(condition_window),
-                    "static_cat": static["categorical"],
-                    "static_cont": static["continuous"],
-                    "static_bool": static["boolean"],
-                }
-
+            for row, start in zip(runs.index, runs["start_hour"]):
+                assert start + self.window_length <= target.shape[1], \
+                    f"{run_id}: window {start}-{start + self.window_length} out of range"
+                sample = self._make_sample(target, condition, season, run_id, start)
+                sample["row"] = row
                 yield sample
 
 
@@ -265,18 +242,30 @@ class PreprocessStaticCols:
         self.static_bool_cols = static_bool_cols
 
     def fit(self, train_manifest):
-        self.cat_encoder.fit(train_manifest[self.static_cat_cols])
-        self.cont_scaler.fit(train_manifest[self.static_cont_cols])
+        if self.static_cat_cols:
+            self.cat_encoder.fit(train_manifest[self.static_cat_cols])
+        if self.static_cont_cols:
+            self.cont_scaler.fit(train_manifest[self.static_cont_cols])
         return self
 
     def transform(self, manifest):
-        cat = self.cat_encoder.transform(manifest[self.static_cat_cols]).astype(np.int64)
-        cat += 1
+        n = len(manifest)
+        if self.static_cat_cols:
+            cat = self.cat_encoder.transform(manifest[self.static_cat_cols]).astype(np.int64)
+            cat += 1
+        else:
+            cat = np.zeros((n, 0), dtype=np.int64)
 
-        cont = self.cont_scaler.transform(manifest[self.static_cont_cols]).astype(np.float32)
 
-        boolean = manifest[self.static_bool_cols].astype(np.float32).to_numpy(copy=True)
+        if self.static_cont_cols:
+            cont = self.cont_scaler.transform(manifest[self.static_cont_cols]).astype(np.float32)
+        else:
+            cont = np.zeros((n, 0), dtype=np.float32)
 
+        if self.static_bool_cols:
+            boolean = manifest[self.static_bool_cols].astype(np.float32).to_numpy(copy=True)
+        else:
+            boolean = np.zeros((n, 0), dtype=np.float32)
         return {
             "categorical": cat,
             "continuous": cont,
@@ -359,6 +348,17 @@ def build_norm_factors(manifest_split, columns, norm_by_col):
                 f[i, 0] = getattr(row, key)
         factors[row.run_id] = f
     return factors
+
+def scaled_minmax(stats, columns, scaler):
+    center, scale, log_mask = scaler                      # (C,1), (C,1), (C,)
+    raw_lo = torch.tensor([stats[c]["min"] for c in columns], dtype=torch.float32).unsqueeze(1)
+    raw_hi = torch.tensor([stats[c]["max"] for c in columns], dtype=torch.float32).unsqueeze(1)
+
+    def f(v):
+        v = torch.where(log_mask.unsqueeze(1), torch.log1p(v.clamp(min=0)), v)
+        return (v - center) / (scale + 1e-8)               # same formula as apply_scaler
+
+    return f(raw_lo).view(1, -1, 1), f(raw_hi).view(1, -1, 1)
 
 def build_condition(preprocessor, train_df, params, batch_size, device="cpu"):
     param_dict = {}

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from skmultilearn.model_selection import IterativeStratification
 from scipy.stats import ks_2samp, chi2_contingency
 import shutil
+import hashlib, json
 
 
 
@@ -198,6 +199,20 @@ def load_stats(path, return_meta=False):
     }
     return stats, meta
 
+def make_unique_stat_file_name(res, norm_name, norm_by_col, cols, run_ids, dir):
+    key = json.dumps({"cols": cols, "norm": norm_by_col, "runs": sorted(run_ids)},
+                     sort_keys=True, default=str)
+    h = hashlib.sha256(key.encode()).hexdigest()[:8]
+    return dir / f"stats_{norm_name}_{res}_{h}.npz"
+
+def load_precalc_stats(res, norm_name, cols, run_ids, norm_variant, dir):
+    norm_by_col = norm_variant[norm_name]
+    path = make_unique_stat_file_name(res, norm_name, norm_by_col, cols, run_ids, dir)
+    stats, meta = load_stats(path, return_meta=True)
+    if meta["resolution"] != res or meta["norm_by_col"] != (norm_by_col or {}):
+        raise ValueError(f"{path.name}: metadata does not match requested config")
+    return stats,meta
+
 def calc_scaler_stats(files,run_ids, columns, aggregation, resolution=None,norm_factors=None, quantiles=(0.01, 0.25, 0.5, 0.75, 0.99), sample_per_file=500, seed=42):
     rng=np.random.default_rng(seed)
     n_cols = len(columns)
@@ -220,7 +235,7 @@ def calc_scaler_stats(files,run_ids, columns, aggregation, resolution=None,norm_
             ts = ts.resample(resolution).agg(agg)
 
         arr = ts.to_numpy(dtype=np.float64)
-        if norm_factors is not None:
+        if norm_factors:
             arr = arr / norm_factors[run_id].T
 
         if not np.isfinite(arr).all():
