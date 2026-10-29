@@ -20,6 +20,9 @@ def season_channels(index):
     ang = 2 * np.pi * frac.to_numpy()
     return np.stack([np.sin(ang), np.cos(ang)]).astype(np.float32)
 
+
+
+
 class h5Dataset(IterableDataset):
     def __init__(self,files,rund_ids,gen_cols,cond_cols,window_length,stride,target_scaler,condition_scaler, target_norm,condition_norm,
                  static_by_run_id,aggregation,resolution=None,shufflefiles=False,
@@ -379,3 +382,5 @@ def build_condition(preprocessor, train_df, params, batch_size, device="cpu"):
         "static_cont": torch.from_numpy(out["continuous"]).float().to(device),
         "static_bool": torch.from_numpy(out["boolean"]).float().to(device),
     }
+
+

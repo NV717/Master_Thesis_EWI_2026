@@ -11,8 +11,10 @@ import hashlib, json
 
 
 
-def datasplit(X,Y, fractions):
+def datasplit(X,Y, fractions, seed=None):
     assert abs(sum(fractions) - 1.0) < 1e-6
+    if seed is not None:
+        np.random.seed(seed)
     indices = np.arange(len(X))
     remaining_X = X
     remaining_Y = Y
@@ -32,7 +34,7 @@ def datasplit(X,Y, fractions):
     splits.append(remaining_idx)
     return splits
 
-def split_manifests(manifest, strat_cols,holdout_type="TH", holdout_age="DE.05", holdout_year=None ,fractions=[0.7, 0.15, 0.15]):
+def split_manifests(manifest, strat_cols,holdout_type="TH", holdout_age="DE.05", holdout_year=None ,fractions=[0.7, 0.15, 0.15], seed=42):
 
     is_holdout_buildings = (manifest["buildingType"] == holdout_type) & (manifest["buildingAgeBin"] == holdout_age)
 
@@ -51,7 +53,7 @@ def split_manifests(manifest, strat_cols,holdout_type="TH", holdout_age="DE.05",
     Y = pd.get_dummies(strat_df).values
     X = np.arange(len(buildings)).reshape(-1, 1)
 
-    train_idx, val_idx, test_idx = datasplit(X, Y, fractions=fractions)
+    train_idx, val_idx, test_idx = datasplit(X, Y, fractions=fractions, seed=seed)
 
     train_buildings = buildings.index[train_idx]
     val_buildings = buildings.index[val_idx]
@@ -178,6 +180,9 @@ def compare_distributions(buildings, train_idx, val_idx, test_idx, cols):
         print()
 
 def save_stats(path, res, cols, stats, norm_by_col=None):
+    if all(isinstance(v, dict) for v in stats.values()):
+        names = next(iter(stats.values())).keys()
+        stats = {n: np.array([stats[c][n] for c in cols]) for n in names}
     np.savez(Path(path), columns=np.array(cols), resolution=str(res),norm_by_col=json.dumps(norm_by_col or {}, sort_keys=True), **stats)
 
 def load_stats(path, return_meta=False):

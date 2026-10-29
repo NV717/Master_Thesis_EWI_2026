@@ -254,15 +254,15 @@ class Unet1D(nn.Module):
         cat_cardinalities=None,
         n_cont=0,
         n_bool=0,
-        n_dyn_con_cols = 0,
+        n_dyn_cond_cols = 0,
 
     ):
         super().__init__()
 
         self.channels = channels
-        self.n_dyn_con_cols = n_dyn_con_cols
+        self.n_dyn_cond_cols = n_dyn_cond_cols
 
-        self.init_conv = nn.Conv1d(channels +2 + n_dyn_con_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
+        self.init_conv = nn.Conv1d(channels +2 + n_dyn_cond_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
 
         dims = [dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -324,7 +324,7 @@ class Unet1D(nn.Module):
         time_cos = time_cos[None, None, :].expand(b, 1, length)
 
         parts= [x]
-        if self.n_dyn_con_cols >0:
+        if self.n_dyn_cond_cols >0:
             parts.append(dyn)
         parts += [time_sin, time_cos]    # Todo put time directily in x
         x = torch.cat(parts,dim=1)
@@ -453,7 +453,8 @@ class DiffusionSchedule:
 
 #Loss function
 
-def p_losses(denoise_model, schedule,x_start, t, static_cat, static_cont, static_bool, noise=None, dyn=None, loss_type="l1"):
+def p_losses(denoise_model, schedule,x_start, t, static_cat, static_cont,
+             static_bool, noise=None, dyn=None, loss_type="l1", boundary_weight=None):
     if noise is None:
         noise = torch.randn_like(x_start)
 
@@ -471,15 +472,20 @@ def p_losses(denoise_model, schedule,x_start, t, static_cat, static_cont, static
     predicted_noise = denoise_model(x_noisy, t, static_cat, static_cont, static_bool, dyn) # ToDO adapt for CFG
 
     if loss_type == 'l1':
-        loss = F.l1_loss(noise, predicted_noise)
+        loss = F.l1_loss(noise, predicted_noise,reduction="none")
     elif loss_type == 'l2':
-        loss = F.mse_loss(noise, predicted_noise)
+        loss = F.mse_loss(noise, predicted_noise,reduction="none")
     elif loss_type == "huber":
-        loss = F.smooth_l1_loss(noise, predicted_noise)
+        loss = F.smooth_l1_loss(noise, predicted_noise,reduction="none")
     else:
         raise NotImplementedError()
 
-    return loss
+    if boundary_weight is not None and dyn is not None:
+        bw = torch.as_tensor(boundary_weight, dtype=loss.dtype, device=loss.device).reshape(1, -1, 1)  # (1, C, 1), or (1,1,1) for a scalar
+        w = 1.0 + (bw - 1.0) * dyn[:, -1:, :]  # (B, C, L)
+        loss = loss * (w / w.mean())
+
+    return loss.mean()
 
 # sampling
 
@@ -549,24 +555,52 @@ def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
         return_trajectory=return_trajectory)
 
 
-@torch.inference_mode()
-def sample_year(model,schedule, dyn_days, static_cat, static_cont, static_bool, K, n_tgt, channels, length, reverse,clip_range=None,):
-    # dyn_days: list of (B, n_dyn, L) tensors, one per day (occupancy, Off Day, ...)
-    prev, out = None, []
-    for dyn in dyn_days:
-        b = dyn.shape[0]
-        if K > 0:
-            ctx = torch.zeros(b, n_tgt + 1, length, device=dyn.device)
-            if prev is not None:
-                tail = prev[:, :, -K:]
-                if reverse:
-                    tail = tail.flip(-1)                       # newest minute in slot 0
-                ctx[:, :n_tgt, :K] = tail.to(dyn.device)
-                ctx[:, n_tgt, :K] = 1.0
-            dyn = torch.cat([dyn, ctx], dim=1)
-        prev = sample1d(model, length, b, channels, schedule, static_cat, static_cont,static_bool, dyn=dyn, clip_range=clip_range)
-        out.append(prev)
-    return torch.cat(out, dim=-1)
-
-
-
+# @torch.inference_mode()
+# def sample_year(model,schedule, dyn_days, static_cat, static_cont, static_bool, K, n_tgt, channels, length, reverse,clip_range=None,):
+#     # dyn_days: list of (B, n_dyn, L) tensors, one per day (occupancy, Off Day, ...)
+#     prev, out = None, []
+#     for dyn in dyn_days:
+#         b = dyn.shape[0]
+#         if K > 0:
+#             ctx = torch.zeros(b, n_tgt + 1, length, device=dyn.device)
+#             if prev is not None:
+#                 tail = prev[:, :, -K:]
+#                 if reverse:
+#                     tail = tail.flip(-1)                       # newest minute in slot 0
+#                 ctx[:, :n_tgt, :K] = tail.to(dyn.device)
+#                 ctx[:, n_tgt, :K] = 1.0
+#             dyn = torch.cat([dyn, ctx], dim=1)
+#         prev = sample1d(model, length, b, channels, schedule, static_cat, static_cont,static_bool, dyn=dyn, clip_range=clip_range)
+#         out.append(prev)
+#     return torch.cat(out, dim=-1)
+#
+#
+# @torch.inference_mode()
+# def sample_year(model, dyn_days, static_cat, static_cont, static_bool, K, n_tgt, length,
+#                 return_cond=True, return_ctx=False, reverse=True):
+#     device = next(model.parameters()).device
+#     prev, out, conds, ctxs = None, [], [], []
+#     for dyn in tqdm(dyn_days, desc="days"):
+#         b = dyn.shape[0]
+#         dyn = dyn.to(device)
+#         conds.append(dyn.cpu())                      # (B, n_dyn[+2], L) before context channels
+#         if K > 0:
+#             ctx = torch.zeros(b, n_tgt + 1, length, device=device)
+#             if prev is not None:
+#                 tail = prev[:, :, -K:]
+#                 if reverse:
+#                     tail = tail.flip(-1)
+#                 ctx[:, :n_tgt, :K] = tail.to(device)
+#                 ctx[:, n_tgt, :K] = 1.0
+#             ctxs.append(ctx.cpu())
+#             dyn = torch.cat([dyn, ctx], dim=1)
+#         prev = sample_dpm(model, (b, n_tgt, length),
+#                           static_cat, static_cont, static_bool, dyn)
+#         out.append(prev)
+#     y = torch.cat(out, dim=-1)                       # (B, n_tgt, T)
+#     if not return_cond:
+#         return y
+#     res = [y, torch.cat(conds, dim=-1)]              # (B, n_dyn[+2], T)
+#     if return_ctx and K > 0:
+#         res.append(torch.cat(ctxs, dim=-1))          # (B, n_tgt+1, T)
+#     return tuple(res)

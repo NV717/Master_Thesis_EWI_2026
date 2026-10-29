@@ -4,13 +4,31 @@ import hashlib, json, os
 from datetime import datetime
 from pathlib import Path
 from src.Diffusion1d import p_losses
+from ema_pytorch import EMA
+from torch.optim import Adam
+from src.Diffusion1d import Unet1D
+from src.DataSets import *
+from src.DataSplitting import *
+
+
+def build_model(cfg, device):
+    cfg = dict(cfg)
+    cfg["dim_mults"] = tuple(cfg["dim_mults"])      # JSON turns tuples into lists
+    return Unet1D(**cfg).to(device)
+
+def build_optimizer(model, cfg):
+    return Adam(model.parameters(), **cfg)
+
+def build_ema(model, cfg):
+    return EMA(model, **cfg)
 
 def train(model, schedule, dataloader, optimizer, ema, device, *,
           epochs, loss_type="l2", run=None, log_every=100,
           run_dir=None, config=None, extras=None, save_every=1,
           start_epoch=0, global_step=0, val_raw=False,
           val_dataloader=None, train_eval_dataloader=None,
-          val_every_steps=None, val_batches=None, ckpt_every_steps=None):
+          val_every_steps=None, val_batches=None, ckpt_every_steps=None
+          , boundary_weight=None):
     schedule = schedule.to(device)
     epoch_losses = []
 
@@ -58,7 +76,7 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
 
             optimizer.zero_grad()
             loss = p_losses(model, schedule, x, t, static_cat, static_cont, static_bool,
-                            dyn=dyn, loss_type=loss_type)
+                            dyn=dyn, loss_type=loss_type, boundary_weight=boundary_weight)
             loss.backward()
             optimizer.step()
             ema.update()
@@ -97,88 +115,6 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
     if run_dir is not None:
         checkpoint(run_dir / "final.pt", epochs, global_step)
     return {"epoch_losses": epoch_losses, "global_step": global_step}
-
-# def train(model, schedule, dataloader, optimizer, ema, device, *,
-#           epochs, loss_type="l2", run=None, log_every=100,run_dir=None, config=None, extras=None, save_every=1,
-#           start_epoch=0,  global_step=0,train_eval_dataloader=None, val_dataloader=None, val_every=1, val_batches=None):
-#     schedule = schedule.to(device)
-#     epoch_losses = []
-#
-#     for epoch in range(start_epoch,epochs):
-#         model.train()
-#         running_loss = 0.0
-#         num_batches =  0
-#
-#         for step, batch in enumerate(tqdm(dataloader, desc=f"epoch {epoch + 1}/{epochs}")):
-#             x = batch["target"].to(device)
-#             dyn = batch["condition"].to(device)
-#             static_cat = batch["static_cat"].to(device)
-#             static_cont = batch["static_cont"].to(device)
-#             static_bool = batch["static_bool"].to(device)
-#
-#             t = torch.randint(0, schedule.timesteps, (x.shape[0],), device=device).long()
-#
-#             optimizer.zero_grad()
-#             loss = p_losses(model, schedule, x, t, static_cat, static_cont, static_bool,
-#                             dyn=dyn, loss_type=loss_type)
-#             loss.backward()
-#             optimizer.step()
-#             ema.update()
-#
-#             l = loss.item()
-#             running_loss += l
-#             num_batches += 1
-#
-#             if step % log_every == 0:
-#                 print(f"Loss: {l:.4f}")
-#             if run is not None:
-#                 run.log({
-#                     "train/loss": l,
-#                     "train/learning_rate": optimizer.param_groups[0]["lr"],
-#                     "epoch": epoch + 1,
-#                     "global_step": global_step,
-#                 })
-#             global_step += 1
-#
-#         epoch_loss = running_loss / num_batches
-#         epoch_losses.append(epoch_loss)
-#         print(f"Epoch {epoch + 1}: loss={epoch_loss:.4f}")
-#         if run is not None:
-#             run.log({"epoch/loss": epoch_loss, "epoch": epoch + 1})
-#         # save checkpoint
-#         if run_dir is not None:
-#             kw = dict(model=model, ema=ema, optimizer=optimizer, epoch=epoch + 1,
-#                       global_step=global_step, config=config, extras=extras)
-#             save_checkpoint(run_dir / "last.pt", **kw)
-#             if (epoch + 1) % save_every == 0:
-#                 save_checkpoint(run_dir / f"epoch_{epoch + 1:03d}.pt", **kw)
-#         # validation losses on fixed dataset
-#         def run_validation():
-#             val_loss, val_per_t = validate(ema.ema_model, schedule, val_dataloader, device,
-#                                            loss_type=loss_type, n_batches=val_batches)
-#             if run is not None:
-#                 run.log({"val/loss_ema": val_loss,
-#                          **{f"val/loss_ema_t{t}": v for t, v in val_per_t.items()},
-#                          "epoch": epoch + 1, "global_step": global_step})
-#             return val_loss
-#
-#         # inside the batch loop, after global_step += 1
-#         if val_dataloader is not None and val_every and global_step % val_every == 0:
-#             run_validation()
-#             model.train()  # needed here: the raw model is validated, or any other eval() switch
-#
-#
-#         if train_eval_dataloader is not None:
-#             train_eval, _ = validate(ema.ema_model, schedule, train_eval_dataloader, device,
-#                                      loss_type=loss_type, n_batches=val_batches)
-#             if run is not None:
-#                 run.log({"train_eval/loss_ema": train_eval, "epoch": epoch + 1, "global_step": global_step})
-#
-#
-#     if run_dir is not None:
-#         save_checkpoint(run_dir / "final.pt", model=model, ema=ema, optimizer=optimizer,
-#                         epoch=epochs, global_step=global_step, config=config, extras=extras)
-#     return {"epoch_losses": epoch_losses, "global_step": global_step}
 
 def make_run_dir(config, root="outputs/runs"):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
