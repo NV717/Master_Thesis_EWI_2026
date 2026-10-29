@@ -28,13 +28,14 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
           start_epoch=0, global_step=0, val_raw=False,
           val_dataloader=None, train_eval_dataloader=None,
           val_every_steps=None, val_batches=None, ckpt_every_steps=None
-          , boundary_weight=None):
+          , boundary_weight=None, cond=None):
+
     schedule = schedule.to(device)
     epoch_losses = []
 
     def run_validation(epoch, global_step):
         val_loss, val_per_t = validate(ema.ema_model, schedule, val_dataloader, device,
-                                       loss_type=loss_type, n_batches=val_batches)
+                                       loss_type=loss_type, n_batches=val_batches,cond=cond)
         print(f"step {global_step}: val_loss_ema={val_loss:.4f}")
         if run is not None:
             run.log({"val/loss_ema": val_loss,
@@ -42,7 +43,7 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
                      "epoch": epoch + 1, "global_step": global_step})
         if train_eval_dataloader is not None:
             train_eval, train_eval_per_t = validate(ema.ema_model, schedule, train_eval_dataloader, device,
-                                     loss_type=loss_type, n_batches=val_batches)
+                                     loss_type=loss_type, n_batches=val_batches,cond=cond)
             if run is not None:
                 run.log({"train_eval/loss_ema": train_eval,
                          **{f"train_eval/loss_ema_t{t}": v for t, v in train_eval_per_t.items()},
@@ -50,7 +51,7 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
 
         if val_raw:
             raw_loss, _ = validate(model, schedule, val_dataloader, device,
-                                   loss_type=loss_type, n_batches=val_batches)
+                                   loss_type=loss_type, n_batches=val_batches,cond=cond)
             model.train()
             if run is not None:
                 run.log({"val/loss_raw": raw_loss, "epoch": epoch + 1, "global_step": global_step})
@@ -76,7 +77,7 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
 
             optimizer.zero_grad()
             loss = p_losses(model, schedule, x, t, static_cat, static_cont, static_bool,
-                            dyn=dyn, loss_type=loss_type, boundary_weight=boundary_weight)
+                            dyn=dyn, loss_type=loss_type, boundary_weight=boundary_weight, cond=cond, drop=True)
             loss.backward()
             optimizer.step()
             ema.update()
@@ -148,7 +149,7 @@ def load_checkpoint(path, model=None, ema=None, optimizer=None, map_location="cp
 
 @torch.inference_mode()
 def validate(model, schedule, dataloader, device, *, loss_type="l2",
-             n_batches=None, n_t=10, seed=0):
+             n_batches=None, n_t=10, seed=0,cond=None):
     model.eval()
     gen = torch.Generator(device=device).manual_seed(seed)
     t_grid = torch.linspace(0, schedule.timesteps - 1, n_t).long().tolist()
@@ -165,7 +166,7 @@ def validate(model, schedule, dataloader, device, *, loss_type="l2",
             t = torch.full((x.shape[0],), t_val, device=device, dtype=torch.long)
             noise = torch.randn(x.shape, device=device, generator=gen)
             sums[t_val] += p_losses(model, schedule, x, t, sc, sn, sb, noise=noise,
-                                    dyn=dyn, loss_type=loss_type).item()
+                                    dyn=dyn, loss_type=loss_type, cond=cond).item()
         count += 1
 
     per_t = {t: s / count for t, s in sums.items()}

@@ -454,22 +454,24 @@ class DiffusionSchedule:
 #Loss function
 
 def p_losses(denoise_model, schedule,x_start, t, static_cat, static_cont,
-             static_bool, noise=None, dyn=None, loss_type="l1", boundary_weight=None):
+             static_bool, noise=None, dyn=None, loss_type="l1", boundary_weight=None,cond=None, drop=False):
     if noise is None:
         noise = torch.randn_like(x_start)
 
     x_noisy = schedule.q_sample(x0=x_start, t=t, noise=noise)
 
-    drop_mask = torch.rand(x_start.shape[0], device=x_start.device) < 0.0
-    static_cat = static_cat.clone()
-    static_cont = static_cont.clone()
-    static_bool = static_bool.clone()
-    static_cat[drop_mask] = 0          # index 0 ie unknown
-    static_cont[drop_mask] = 0.0
-    static_bool[drop_mask] = 0.0
+    ctx_mask = None
+
+    if boundary_weight is not None and dyn is not None:
+        mask_idx = cond.ctx_mask_idx if cond is not None and cond.ctx_mask_idx is not None else dyn.shape[1] - 1
+        ctx_mask = dyn[:, mask_idx:mask_idx+1,:]
+
+    if cond is not None:
+        keep = cond.draw_dropout(static_cat) if drop else cond.keep_all(static_cat)
+        dyn, static_cat, static_cont, static_bool = cond.apply(dyn, static_cat, static_cont, static_bool, keep)
 
 
-    predicted_noise = denoise_model(x_noisy, t, static_cat, static_cont, static_bool, dyn) # ToDO adapt for CFG
+    predicted_noise = denoise_model(x_noisy, t, static_cat, static_cont, static_bool, dyn)
 
     if loss_type == 'l1':
         loss = F.l1_loss(noise, predicted_noise,reduction="none")
@@ -480,14 +482,30 @@ def p_losses(denoise_model, schedule,x_start, t, static_cat, static_cont,
     else:
         raise NotImplementedError()
 
-    if boundary_weight is not None and dyn is not None:
-        bw = torch.as_tensor(boundary_weight, dtype=loss.dtype, device=loss.device).reshape(1, -1, 1)  # (1, C, 1), or (1,1,1) for a scalar
-        w = 1.0 + (bw - 1.0) * dyn[:, -1:, :]  # (B, C, L)
+    if ctx_mask is not None:
+        bw = torch.as_tensor(boundary_weight, dtype=loss.dtype, device=loss.device).reshape(1, -1, 1)
+        w = 1.0 + (bw - 1.0) * ctx_mask
         loss = loss * (w / w.mean())
 
     return loss.mean()
 
 # sampling
+"""https://arxiv.org/pdf/2207.12598"""
+@torch.inference_mode()
+def predict_noise(model, x,t,static_cat, static_cont, static_bool, dyn, cond=None, keep=None, scale=1.0):
+    if cond is None:
+        return model(x, t, static_cat, static_cont, static_bool, dyn)
+
+    if keep is None:
+        keep = cond.keep_all(static_cat, 1.0)
+    dyn1, static_cat1, static_cont1, static_bool1 = cond.apply(dyn, static_cat, static_cont, static_bool, keep)
+    eps_cond = model(x,t, static_cat1, static_cont1, static_bool1, dyn1)
+    if scale == 1.0:
+        return eps_cond
+    dyn2, static_cat2, static_cont2, static_bool2 = cond.apply(dyn, static_cat, static_cont, static_bool, cond.keep_all(static_cat, 0.0))
+    eps_uncond = model(x,t, static_cat2, static_cont2, static_bool2, dyn2)
+    return eps_uncond + scale*(eps_cond-eps_uncond)
+
 
 @torch.inference_mode()
 def compute_channel_minmax(dataloader, n_channels, key="target", channel_dim=1, progress=True):
@@ -503,8 +521,9 @@ def compute_channel_minmax(dataloader, n_channels, key="target", channel_dim=1, 
     return lo.view(1, -1, 1), hi.view(1, -1, 1)
 
 @torch.inference_mode()
-def p_sample(model, x, t, t_index,schedule,static_cat, static_cont, static_bool, dyn=None,clip_range=True):
-    pred_noise = model(x, t, static_cat, static_cont, static_bool, dyn)
+def p_sample(model, x, t, t_index,schedule,static_cat, static_cont, static_bool, dyn=None,clip_range=True,
+             cond=None, keep=None, scale=1.0):
+    pred_noise = predict_noise(model, x, t, static_cat, static_cont, static_bool, dyn, cond, keep, scale)
 
     # predict x0 from x_t and the predicted noise
     x0 = (schedule.extract("sqrt_recip_alphas_cumprod", t, x.shape) * x
@@ -524,7 +543,7 @@ def p_sample(model, x, t, t_index,schedule,static_cat, static_cont, static_bool,
 
 @torch.inference_mode()
 def p_sample_loop(model, shape, schedule, static_cat, static_cont, static_bool,
-                  dyn=None, clip_range=None, return_trajectory=False):
+                  dyn=None, clip_range=None, return_trajectory=False,cond=None, keep=None, scale=1.0):
     device = next(model.parameters()).device
     schedule = schedule.to(device)
     b = shape[0]
@@ -534,7 +553,7 @@ def p_sample_loop(model, shape, schedule, static_cat, static_cont, static_bool,
     for i in tqdm(reversed(range(schedule.timesteps)), desc="sampling", total=schedule.timesteps):
         t = torch.full((b,), i, device=device, dtype=torch.long)
         x = p_sample(model, x, t, i, schedule, static_cat, static_cont, static_bool,
-                     dyn, clip_range)
+                     dyn, clip_range, cond, keep, scale)
         if return_trajectory:
             traj.append(x.cpu().numpy())
     return traj if return_trajectory else x.cpu()
@@ -542,7 +561,10 @@ def p_sample_loop(model, shape, schedule, static_cat, static_cont, static_bool,
 
 @torch.inference_mode()
 def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
-             static_cont, static_bool, dyn=None, clip_range=None, return_trajectory=False):
+             static_cont, static_bool, dyn=None, clip_range=None, return_trajectory=False,
+             cond=None, keep=None, scale=1.0):
+    if cond is not None and keep is not None:
+        keep =cond.keep_from(keep, static_cat)
     return p_sample_loop(
         model,
         shape=(batch_size, channels, sequence_length),
@@ -552,7 +574,11 @@ def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
         static_bool=static_bool,
         dyn= dyn,
         clip_range =clip_range,
-        return_trajectory=return_trajectory)
+        return_trajectory=return_trajectory,
+        cond=cond,
+        keep=keep,
+        scale=scale,
+    )
 
 
 # @torch.inference_mode()

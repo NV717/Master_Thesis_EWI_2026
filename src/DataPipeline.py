@@ -99,8 +99,12 @@ class DataPipeline:
         return [len(cats) for cats in self.preprocessor.cat_encoder.categories_]
 
     def model_kwargs(self):
-        return dict(channels=len(self.cfg.target_cols),cat_cardinalities=self.cat_cardinalities,
-                    n_cont=len(self.cfg.static_cont_cols),n_bool=len(self.cfg.static_bool_cols), n_dyn_cond_cols=self.cfg.n_dyn_cond_cols)
+        return dict(
+                    channels=len(self.cfg.target_cols),
+                    cat_cardinalities=self.cat_cardinalities,
+                    n_cont=len(self.cfg.static_cont_cols),
+                    n_bool=len(self.cfg.static_bool_cols)+ self.cfg.n_static_flags,
+                    n_dyn_cond_cols=self.cfg.n_dyn_model_cols)
 
     def x0_minmax(self):
         return scaled_minmax(self.stats, self.cfg.target_cols, self.target_scaler)
