@@ -8,6 +8,7 @@ from einops.layers.torch import Rearrange
 import shutil
 from pathlib import Path
 import torch
+from diffusers import DPMSolverMultistepScheduler
 from torch import nn, einsum
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
@@ -558,16 +559,48 @@ def p_sample_loop(model, shape, schedule, static_cat, static_cont, static_bool,
             traj.append(x.cpu().numpy())
     return traj if return_trajectory else x.cpu()
 
+def sample_dpm(model, shape, schedule, static_cat, static_cont, static_bool, dyn=None, num_steps=20,
+               clip_range=None, cond=None, keep=None, scale=1.0, algorithm="dpmsolver++", progress=False):
+    device = next(model.parameters()).device
+    solver = DPMSolverMultistepScheduler(
+        num_train_timesteps=schedule.timesteps,
+        trained_betas=schedule.betas.cpu().numpy(),
+        prediction_type="epsilon",
+        algorithm_type=algorithm,
+        solver_order=2,
+        timestep_spacing="trailing",
+        lower_order_final=True)
+    solver.set_timesteps(num_steps, device=device)
+    ac = schedule.alphas_cumprod.to(device)
+    x = torch.randn(shape, device=device)
+    for t in tqdm(solver.timesteps, desc="DPM-Solver", disable=not progress):
+        tb = torch.full((shape[0],), int(t), device=device, dtype=torch.long)
+        eps = predict_noise(model, x, tb, static_cat, static_cont, static_bool, dyn, cond, keep, scale)
+        if clip_range is not None:
+            lo, hi = clip_range
+            a = ac[int(t)]
+            x0 = ((x - (1 - a).sqrt() * eps) / a.sqrt()).clamp(lo.to(device), hi.to(device))
+            eps = (x - a.sqrt() * x0) / (1 - a).sqrt()
+        x = solver.step(eps, t, x).prev_sample
+    return x.cpu()
+
+
 
 @torch.inference_mode()
 def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
              static_cont, static_bool, dyn=None, clip_range=None, return_trajectory=False,
-             cond=None, keep=None, scale=1.0):
+             cond=None, keep=None, scale=1.0, sampler="ddpm", num_steps=50):
     if cond is not None and keep is not None:
         keep =cond.keep_from(keep, static_cat)
+    shape = (batch_size, channels, sequence_length)
+    if sampler == "dpm":
+        return sample_dpm(model, shape, schedule, static_cat, static_cont, static_bool, dyn,
+                          num_steps, clip_range, cond, keep, scale)
+    if sampler != "ddpm":
+        raise ValueError(f"unknown sampler {sampler}")
     return p_sample_loop(
         model,
-        shape=(batch_size, channels, sequence_length),
+        shape=shape,
         schedule=schedule,
         static_cat=static_cat,
         static_cont=static_cont,
@@ -581,52 +614,41 @@ def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
     )
 
 
-# @torch.inference_mode()
-# def sample_year(model,schedule, dyn_days, static_cat, static_cont, static_bool, K, n_tgt, channels, length, reverse,clip_range=None,):
-#     # dyn_days: list of (B, n_dyn, L) tensors, one per day (occupancy, Off Day, ...)
-#     prev, out = None, []
-#     for dyn in dyn_days:
-#         b = dyn.shape[0]
-#         if K > 0:
-#             ctx = torch.zeros(b, n_tgt + 1, length, device=dyn.device)
-#             if prev is not None:
-#                 tail = prev[:, :, -K:]
-#                 if reverse:
-#                     tail = tail.flip(-1)                       # newest minute in slot 0
-#                 ctx[:, :n_tgt, :K] = tail.to(dyn.device)
-#                 ctx[:, n_tgt, :K] = 1.0
-#             dyn = torch.cat([dyn, ctx], dim=1)
-#         prev = sample1d(model, length, b, channels, schedule, static_cat, static_cont,static_bool, dyn=dyn, clip_range=clip_range)
-#         out.append(prev)
-#     return torch.cat(out, dim=-1)
-#
-#
-# @torch.inference_mode()
-# def sample_year(model, dyn_days, static_cat, static_cont, static_bool, K, n_tgt, length,
-#                 return_cond=True, return_ctx=False, reverse=True):
-#     device = next(model.parameters()).device
-#     prev, out, conds, ctxs = None, [], [], []
-#     for dyn in tqdm(dyn_days, desc="days"):
-#         b = dyn.shape[0]
-#         dyn = dyn.to(device)
-#         conds.append(dyn.cpu())                      # (B, n_dyn[+2], L) before context channels
-#         if K > 0:
-#             ctx = torch.zeros(b, n_tgt + 1, length, device=device)
-#             if prev is not None:
-#                 tail = prev[:, :, -K:]
-#                 if reverse:
-#                     tail = tail.flip(-1)
-#                 ctx[:, :n_tgt, :K] = tail.to(device)
-#                 ctx[:, n_tgt, :K] = 1.0
-#             ctxs.append(ctx.cpu())
-#             dyn = torch.cat([dyn, ctx], dim=1)
-#         prev = sample_dpm(model, (b, n_tgt, length),
-#                           static_cat, static_cont, static_bool, dyn)
-#         out.append(prev)
-#     y = torch.cat(out, dim=-1)                       # (B, n_tgt, T)
-#     if not return_cond:
-#         return y
-#     res = [y, torch.cat(conds, dim=-1)]              # (B, n_dyn[+2], T)
-#     if return_ctx and K > 0:
-#         res.append(torch.cat(ctxs, dim=-1))          # (B, n_tgt+1, T)
-#     return tuple(res)
+@torch.inference_mode
+def sample_year(model, schedule, dyn_days, static_cat, static_cont, static_bool, context_steps, n_tgt, length,
+                reverse=True, clip_range=None, return_cond=True, return_ctx=False, **sample_kw):
+    device = next(model.parameters()).device
+    static_cat = static_cat.to(device)
+    static_cont = static_cont.to(device)
+    static_bool= static_bool.to(device)
+
+    prev = None
+    out = []
+    conds = []
+    ctxs = []
+
+    for dyn in tqdm(dyn_days, desc="days"):
+        b = dyn.shape[0]
+        dyn = dyn.to(device)
+        conds.append(dyn.cpu())
+        if context_steps > 0:
+            ctx = torch.zeros(b, n_tgt + 1, length, device=device)
+            if prev is not None:
+                tail = prev[:, :, -context_steps:]
+                if reverse:
+                    tail = tail.flip(-1)
+                ctx[:, :n_tgt, :context_steps] = tail.to(device)
+                ctx[:, n_tgt, :context_steps] = 1.0
+            ctxs.append(ctx.cpu())
+            dyn = torch.cat([dyn, ctx], dim=1)
+        prev = sample1d(model, length, b, n_tgt, schedule, static_cat, static_cont, static_bool,
+                        dyn=dyn, clip_range=clip_range, **sample_kw)
+        out.append(prev)
+    y = torch.cat(out, dim=-1)
+    if not return_cond:
+        return y
+    res = [y, torch.cat(conds, dim=-1)]
+    if return_ctx and context_steps > 0:
+        res.append(torch.cat(ctxs, dim=-1))
+    return tuple(res)
+
