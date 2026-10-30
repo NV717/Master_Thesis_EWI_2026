@@ -341,13 +341,17 @@ def _yearly_stats(load, occ, total_persons, a_ref) -> dict:
     return res
 
 def _daily_stats(load, offday) -> list[dict]:
-    g = load.groupby(load.index.date) #equivalent to resample D
+    g = load.groupby(load.index.date)
     d_max, d_mean = g.max(), g.mean()
     pps = peak_plateau_ramp_stats(load)
+    g_without_zero = load.where(load != 0).groupby(load.index.date)
     all_daily = {
         "max": d_max,
         "min": g.min(),
         "mean": d_mean,
+        "max_nz": g_without_zero.max(),
+        "min_nz": g_without_zero.min(),
+        "mean_nz": g_without_zero.mean(),
         "p05": g.quantile(0.05),
         "p10": g.quantile(0.10),
         "p95": g.quantile(0.95),
@@ -451,7 +455,7 @@ LOAD_DOMAINS = {
 }
 
 
-def process_run(run: Path) -> dict:
+def process_run(run: Path, correlations: bool = True) -> dict:
     ts = pd.read_hdf(run, key="timeseries")
     params = pd.read_hdf(run, key="params").iloc[0]
 
@@ -478,22 +482,25 @@ def process_run(run: Path) -> dict:
         out["daily"].extend({**key, **row} for row in _daily_stats(load, offday))
         out["hourly"].extend({**key, **row} for row in _hourly_profile(load, offday_minutes))
 
-    corr, partial = _correlation_stats(ts)
+    if correlations:
+        corr, partial = _correlation_stats(ts)
 
-    out["correlations"] = corr
-    out["partial_correlations"] = partial
+        out["correlations"] = corr
+        out["partial_correlations"] = partial
 
-    out["autocorrelations"] = _autocorrelation_stats(ts)
+        out["autocorrelations"] = _autocorrelation_stats(ts)
     return out
 
 
-def process_run_cached(run: Path, cache_dir) -> dict:
+def process_run_cached(run: Path, cache_dir, correlations: bool = True) -> dict:
     cache_file = Path(cache_dir) / f"{run.stem}.pkl" if cache_dir else None
     if cache_file is not None and cache_file.exists():
         with open(cache_file, "rb") as f:
-            return pickle.load(f)
+            cached = pickle.load(f)
+        if not correlations or "correlations" in cached:
+            return cached
     try:
-        out = process_run(run)
+        out = process_run(run, correlations)
     except Exception as e:
         return {"error": {"run_id": run.stem, "error": repr(e)}}
     if cache_file is not None:
@@ -502,14 +509,14 @@ def process_run_cached(run: Path, cache_dir) -> dict:
     return out
 
 
-def check_timeseries(resultsdir, n_jobs=-1, cache_dir=None) -> dict[str, pd.DataFrame]:
+def check_timeseries(resultsdir, n_jobs=-1, cache_dir=None, correlations=False) -> dict[str, pd.DataFrame]:
     resultsdir = Path(resultsdir)
     completed_runs = sorted(resultsdir.glob("run_*.h5"))
     if cache_dir is not None:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     results = Parallel(n_jobs=n_jobs, return_as="generator")(
-        delayed(process_run_cached)(run, cache_dir) for run in completed_runs
+        delayed(process_run_cached)(run, cache_dir, correlations) for run in completed_runs
     )
     results = list(tqdm(results, total=len(completed_runs), unit="run"))
 
@@ -524,7 +531,7 @@ def check_timeseries(resultsdir, n_jobs=-1, cache_dir=None) -> dict[str, pd.Data
         "failed": pd.DataFrame(failed),
     }
 
-    if ok:
+    if ok and correlations:
         output["correlations"] = pd.concat({r["runs"]["run_id"]: r["correlations"] for r in ok},names=["run_id"])
         output["partial_correlations"] = pd.concat({r["runs"]["run_id"]: r["partial_correlations"]for r in ok},names=["run_id"])
         output["autocorrelations"] = pd.concat({r["runs"]["run_id"]: r["autocorrelations"]for r in ok},names=["run_id"])
