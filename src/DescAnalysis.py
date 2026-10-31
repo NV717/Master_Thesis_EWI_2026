@@ -7,7 +7,7 @@ from collections import Counter
 import numpy as np
 import ast
 import seaborn as sns
-from Ch_1_Data_Preparation.DataPreparationHelper import *
+from src.DataPreparation import *
 TYPES = ["SFH", "TH", "MFH", "AB"]
 COLOR_DICT = {"SFH": "#2f6db5", "TH": "#e69f00", "MFH": "#2a9d8f", "AB": "#c44e52"}
 

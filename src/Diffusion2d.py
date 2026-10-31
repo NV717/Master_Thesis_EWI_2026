@@ -15,17 +15,25 @@ was heavily modified for 1d timeseries use'''
 
 
 
+# def Upsample2d(dim, dim_out=None):
+#     return nn.Sequential(
+#         nn.Upsample(scale_factor=2, mode="nearest"),
+#         nn.Conv2d(dim, default(dim_out, dim), 3, padding=1),
+#     )
+#
+#
+# def Downsample2d(dim, dim_out=None):
+#     return nn.Conv2d(dim, default(dim_out, dim), kernel_size=4, stride=2, padding=1)
+#
+def Downsample2d(dim, dim_out=None):
+    return nn.Conv2d(dim, default(dim_out, dim),
+                     kernel_size=(3, 4), stride=(1, 2), padding=(1, 1))
+
 def Upsample2d(dim, dim_out=None):
     return nn.Sequential(
-        nn.Upsample(scale_factor=2, mode="nearest"),
+        nn.Upsample(scale_factor=(1, 2), mode="nearest"),
         nn.Conv2d(dim, default(dim_out, dim), 3, padding=1),
     )
-
-
-def Downsample2d(dim, dim_out=None):
-    return nn.Conv2d(dim, default(dim_out, dim), kernel_size=4, stride=2, padding=1)
-
-
 
 class WeightStandardizedConv2d(nn.Conv2d):
     def forward(self,x):
@@ -150,6 +158,16 @@ class LinearAttention2D(nn.Module):
         return self.to_out(out)
 
 
+def attention_ctrl_2d(type, dim):
+    if type == "full":
+        return Residual(PreNorm2d(dim, Attention2d(dim)))
+    if type == "linear":
+        return Residual(PreNorm2d(dim, Attention2d(dim)))
+    if type in ("none", None):
+        return nn.Identity()
+    raise ValueError("invalid attention type")
+
+
 class PreNorm2d(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -165,6 +183,8 @@ class PreNorm2d(nn.Module):
 class Unet2D(nn.Module):
     def __init__(
         self,
+        n_days,
+        steps_per_day,
         dim=32,
         channels=1,
         dim_mults=(1, 2, 4),
@@ -173,9 +193,9 @@ class Unet2D(nn.Module):
         n_cont=0,
         n_bool=0,
         n_dyn_cond_cols = 0,
-        n_days = 1,
-        steps_per_day = 1440,
-
+        use_day_index = False,
+        mid_attn="full",
+        level_attn="none"
     ):
         super().__init__()
 
@@ -183,9 +203,12 @@ class Unet2D(nn.Module):
         self.n_dyn_cond_cols = n_dyn_cond_cols
 
         self.n_days = n_days
-        self.steps_per_days = steps_per_day
+        self.steps_per_day = steps_per_day
 
-        self.init_conv = nn.Conv2d(channels +2 + n_dyn_cond_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
+        self.use_day_index = use_day_index
+        extra = 1 if use_day_index else 0
+
+        self.init_conv = nn.Conv2d(channels +2+extra + n_dyn_cond_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
 
         dims = [dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -215,8 +238,11 @@ class Unet2D(nn.Module):
         for dim_in, dim_out in in_out:
             self.downs.append(nn.ModuleList([block_klass(dim_in,dim_in,time_emb_dim=time_dim), Downsample2d(dim_in,dim_out)]))
 
+
         # Bottleneck
         mid_dim = dims[-1]
+
+
 
         self.mid_block1 = block_klass(mid_dim,mid_dim,time_emb_dim=time_dim)
         self.mid_attn = Residual(PreNorm2d(mid_dim,Attention2d(mid_dim)))
@@ -229,6 +255,16 @@ class Unet2D(nn.Module):
 
             self.ups.append(nn.ModuleList([Upsample2d(dim_out,dim_in),block_klass(dim_in * 2,dim_in,time_emb_dim=time_dim)])) #dim_in * 2 cause cat with skip cons
 
+        #Attention
+        n_levels = len(in_out)
+        if isinstance(level_attn, str):
+            level_attn = (level_attn,) * n_levels
+        else:
+            level_attn = tuple(level_attn)
+
+        self.mid_attn = attention_ctrl_2d(mid_attn, mid_dim)
+        self.down_attn = nn.ModuleList([attention_ctrl_2d(k, d_in) for k, (d_in, _) in zip(level_attn, in_out)])
+        self.up_attn = nn.ModuleList([attention_ctrl_2d(k, d_in) for k, (d_in, _) in zip(reversed(level_attn), reversed(in_out))])
 
         # Final output
         self.final_block = block_klass(dim,dim,time_emb_dim=time_dim)
@@ -237,15 +273,25 @@ class Unet2D(nn.Module):
     def forward(self, x, time, static_cat, static_cont, static_bool, dyn=None):
 
         b, c, length = x.shape
-        D, S = self.n_days, self.steps_per_da
+        D, S = self.n_days, self.steps_per_day
         x = x.view(b, c, D, S)
 
-        positions = torch.arange(length,device=x.device,dtype=x.dtype)
+        assert length == self.n_days * self.steps_per_day, (length, self.n_days, self.steps_per_day)
+
+        if self.n_dyn_cond_cols > 0:
+            dyn = dyn.view(b, -1, D, S)
+        positions = torch.arange(S,device=x.device,dtype=x.dtype)
 
         tod_sin = torch.sin(2 * math.pi * positions / S).view(1, 1, 1, S).expand(b, 1, D, S)
         tod_cos = torch.cos(2 * math.pi * positions / S).view(1, 1, 1, S).expand(b, 1, D, S)
 
         parts= [x]
+
+        if self.use_day_index:
+            day = torch.arange(D, device=x.device, dtype=x.dtype) / max(D - 1, 1)
+            day = day.view(1, 1, D, 1).expand(b, 1, D, S)
+            parts.append(day)
+
         if self.n_dyn_cond_cols >0:
             parts.append(dyn)
         parts += [tod_sin, tod_cos]
@@ -257,11 +303,13 @@ class Unet2D(nn.Module):
 
         skips = []
         # DownPath
-        for block, downsample in self.downs:
+        for (block, downsample), attn in zip(self.downs, self.down_attn):
 
             x = block(x, t)
+            x = attn(x)
             skips.append(x)
             x = downsample(x)
+
 
         # Bottleneck
         x = self.mid_block1(x, t)
@@ -269,7 +317,7 @@ class Unet2D(nn.Module):
         x = self.mid_block2(x, t)
 
         # Up path
-        for upsample, block in self.ups:
+        for (upsample, block), attn in zip(self.ups, self.up_attn):
             x = upsample(x)
             skip = skips.pop()
 
@@ -278,9 +326,10 @@ class Unet2D(nn.Module):
 
             x = torch.cat((x, skip),dim=1)
             x = block(x, t)
+            x = attn(x)
 
         x = self.final_block(x, t)
-        return self.final_conv(x).reshape(b, self.channels, L)
+        return self.final_conv(x).reshape(b, self.channels, length)
 
 
 

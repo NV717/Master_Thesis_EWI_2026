@@ -58,19 +58,10 @@ class Residual(nn.Module):
         return self.fn(x, *args, **kwargs) + x
 
 def Downsample1d(dim, dim_out=None):
-    return nn.Conv1d(
-        dim,
-        default(dim_out, dim),
-        kernel_size=4,
-        stride=2,
-        padding=1
-    )
+    return nn.Conv1d(dim,default(dim_out, dim), kernel_size=4,stride=2,padding=1)
 
 def Upsample1d(dim, dim_out=None):
-    return nn.Sequential(
-        nn.Upsample(scale_factor=2, mode="nearest"),
-        nn.Conv1d(dim,  default(dim_out, dim), kernel_size=3, padding=1)
-    )
+    return nn.Sequential(nn.Upsample(scale_factor=2, mode="nearest"),nn.Conv1d(dim,  default(dim_out, dim), kernel_size=3, padding=1))
 
 
 #position Embedding
@@ -229,6 +220,15 @@ class LinearAttention1D(nn.Module):
         out = rearrange(out, "b h c n -> b (h c) n", h=self.heads)
         return self.to_out(out)
 
+def attention_ctrl_1d(type, dim):
+    if type == "full":
+        return Residual(PreNorm1d(dim, Attention1d(dim)))
+    if type == "linear":
+        return Residual(PreNorm1d(dim, Attention1d(dim)))
+    if type in ("none", None):
+        return nn.Identity()
+    raise ValueError("invalid attention type")
+
 
 class PreNorm1d(nn.Module):
     def __init__(self, dim, fn):
@@ -256,14 +256,21 @@ class Unet1D(nn.Module):
         n_cont=0,
         n_bool=0,
         n_dyn_cond_cols = 0,
+        steps_per_day = 1440,
+        use_day_index = False,
+        mid_attn="full",
+        level_attn="none",
 
     ):
         super().__init__()
 
         self.channels = channels
         self.n_dyn_cond_cols = n_dyn_cond_cols
+        self.steps_per_day = steps_per_day
+        self.use_day_index = use_day_index
+        extra = 1 if use_day_index else 0
 
-        self.init_conv = nn.Conv1d(channels +2 + n_dyn_cond_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
+        self.init_conv = nn.Conv1d(channels +2 + extra+ n_dyn_cond_cols, dim,kernel_size=3, padding=1) #+2 because extra sin/cos
 
         dims = [dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -307,6 +314,16 @@ class Unet1D(nn.Module):
 
             self.ups.append(nn.ModuleList([Upsample1d(dim_out,dim_in),block_klass(dim_in * 2,dim_in,time_emb_dim=time_dim)])) #dim_in * 2 cause cat with skip cons
 
+        # Attention
+        n_levels = len(in_out)
+        if isinstance(level_attn, str):
+            level_attn = (level_attn,) * n_levels
+        else:
+            level_attn = tuple(level_attn)
+
+        self.mid_attn = attention_ctrl_1d(mid_attn, mid_dim)
+        self.down_attn = nn.ModuleList([attention_ctrl_1d(k, d_in) for k, (d_in, _) in zip(level_attn, in_out)])
+        self.up_attn = nn.ModuleList([attention_ctrl_1d(k, d_in) for k, (d_in, _) in zip(reversed(level_attn), reversed(in_out))])
 
         # Final output
         self.final_block = block_klass(dim,dim,time_emb_dim=time_dim)
@@ -315,19 +332,25 @@ class Unet1D(nn.Module):
     def forward(self, x, time, static_cat, static_cont, static_bool, dyn=None):
 
         b, c, length = x.shape
-
+        S = self.steps_per_day
         positions = torch.arange(length,device=x.device,dtype=x.dtype)
 
-        time_sin = torch.sin(2 * math.pi * positions / 1440) #todo check for problem on different res
-        time_cos = torch.cos(2 * math.pi * positions / 1440)
-
+        time_sin = torch.sin(2 * math.pi * positions / S) #todo check for problem on different res
+        time_cos = torch.cos(2 * math.pi * positions / S)
+        #todo make it like the 2d version and maybe add a day index channel
         time_sin = time_sin[None, None, :].expand(b, 1, length)
         time_cos = time_cos[None, None, :].expand(b, 1, length)
 
         parts= [x]
+
+        if self.use_day_index:
+            n_days = max(length // S, 1)
+            day = (positions // S) / max(n_days - 1, 1)
+            parts.append(day[None, None, :].expand(b, 1, length))
+
         if self.n_dyn_cond_cols >0:
             parts.append(dyn)
-        parts += [time_sin, time_cos]    # Todo put time directily in x
+        parts += [time_sin, time_cos]
         x = torch.cat(parts,dim=1)
 
         x = self.init_conv(x)
@@ -336,9 +359,10 @@ class Unet1D(nn.Module):
 
         skips = []
         # DownPath
-        for block, downsample in self.downs:
+        for (block, downsample), attn in zip(self.downs, self.down_attn):
 
             x = block(x, t)
+            x = attn(x)
             skips.append(x)
             x = downsample(x)
 
@@ -348,7 +372,7 @@ class Unet1D(nn.Module):
         x = self.mid_block2(x, t)
 
         # Up path
-        for upsample, block in self.ups:
+        for (upsample, block), attn in zip(self.ups, self.up_attn):
             x = upsample(x)
             skip = skips.pop()
 
@@ -357,6 +381,7 @@ class Unet1D(nn.Module):
 
             x = torch.cat((x, skip),dim=1)
             x = block(x, t)
+            x = attn(x)
 
         # Final
         x = self.final_block(x, t)

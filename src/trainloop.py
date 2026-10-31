@@ -7,14 +7,17 @@ from src.Diffusion1d import p_losses
 from ema_pytorch import EMA
 from torch.optim import Adam
 from src.Diffusion1d import Unet1D
+from src.Diffusion2d import Unet2D
 from src.DataSets import *
 from src.DataSplitting import *
 
 
 def build_model(cfg, device):
     cfg = dict(cfg)
-    cfg["dim_mults"] = tuple(cfg["dim_mults"])      # JSON turns tuples into lists
-    return Unet1D(**cfg).to(device)
+    cfg["dim_mults"] = tuple(cfg["dim_mults"])
+    model_type = cfg.pop("model_type", "1d")
+    cls = {"1d": Unet1D, "2d": Unet2D}[model_type]
+    return cls(**cfg).to(device)
 
 def build_optimizer(model, cfg):
     return Adam(model.parameters(), **cfg)
@@ -117,13 +120,33 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
         checkpoint(run_dir / "final.pt", epochs, global_step)
     return {"epoch_losses": epoch_losses, "global_step": global_step}
 
-def make_run_dir(config, root="outputs/runs"):
+def make_run_dir(config, root="outputs/runs", experiment=None):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     h = hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()[:6]
-    run_dir = Path(root) / f"{stamp}_{h}"
+    if experiment:
+        run_dir = Path(root) / f"{stamp}_{h}_{experiment}"
+    else:
+        run_dir = Path(root) / f"{stamp}_{h}"
     run_dir.mkdir(parents=True)
     (run_dir / "config.json").write_text(json.dumps(config, indent=2, default=str))
     return run_dir
+
+def make_model_cfg(pipe, model_type= "1d", dim=64, dim_mults=(1,2,4), mid_attn="full",
+                   level_attn="none", use_day_index=False):
+    model_cfg = dict(
+        model_type = model_type,
+        dim=dim,
+        dim_mults=dim_mults,
+        resnet_block_groups=8,
+        mid_attn=mid_attn,
+        level_attn=level_attn,
+        use_day_index=use_day_index,
+        steps_per_day=pipe.cfg.steps_per_day,
+        **pipe.model_kwargs(),
+    )
+    if model_type == "2d":
+        model_cfg["n_days"] = pipe.cfg.window_days
+    return model_cfg
 
 def save_checkpoint(path, *, model, ema, optimizer, epoch, global_step, config, extras=None):
     path = Path(path)

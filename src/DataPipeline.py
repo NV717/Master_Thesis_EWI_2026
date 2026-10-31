@@ -59,12 +59,12 @@ class DataPipeline:
                 raise
         print("no files found, computing stats insted")
         files = [Path(cfg.split_dirs["train"]) / f"{r}.h5" for r in run_ids]
-        factors = build_norm_factors(train_df, cfg.stat_columns, cfg.norm_by_col)
-        raw = calc_scaler_stats(files, run_ids, cfg.stat_columns, cfg.ts_agg, resolution=cfg.resolution, norm_factors=factors)
+        factors = build_norm_factors(train_df, cfg.stat_calc_columns, cfg.norm_by_col)
+        raw = calc_scaler_stats(files, run_ids, cfg.stat_calc_columns, cfg.ts_agg, resolution=cfg.resolution, norm_factors=factors)
         stats_dir.mkdir(parents=True, exist_ok=True)
-        path = make_unique_stat_file_name(cfg.resolution, cfg.norm_method, cfg.norm_by_col, cfg.stat_columns, run_ids,stats_dir)
-        save_stats(path, cfg.resolution, cfg.stat_columns, raw, norm_by_col=cfg.norm_by_col)
-        return {col: {k: float(v[i]) for k, v in raw.items()} for i, col in enumerate(cfg.stat_columns)}
+        path = make_unique_stat_file_name(cfg.resolution, cfg.norm_method, cfg.norm_by_col, cfg.stat_calc_columns, run_ids,stats_dir)
+        save_stats(path, cfg.resolution, cfg.stat_calc_columns, raw, norm_by_col=cfg.norm_by_col)
+        return {col: {k: float(v[i]) for k, v in raw.items()} for i, col in enumerate(cfg.stat_calc_columns)}
 
     def save_files(self, path):
         path = Path(path)
@@ -156,7 +156,8 @@ class DataPipeline:
 
 
     def Window_drawer(self, split, n_runs, n_windows, seed=0):
-        return draw_sampling_windows(self.split_dfs[split], self.cfg.strat_cols, n_runs, n_windows, self.cfg.steps_per_day, seed=seed)
+        return draw_sampling_windows(self.split_dfs[split], self.cfg.strat_cols, n_runs, n_windows,
+                                     self.cfg.steps_per_day, seed=seed, window_days=self.cfg.window_days)
 
     def windowdataset(self, split, index):
         prep = self.prepare_data(split)

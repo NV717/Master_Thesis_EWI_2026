@@ -68,6 +68,9 @@ class h5Dataset(IterableDataset):
         if self.resolution is not None:
             agg= {col: self.aggregation[col] for col in self.all_cols}
             ts = ts.resample(self.resolution).agg(agg)
+            spd = stepsperday(self.resolution)
+            if len(ts) % spd or ts.index[0] != ts.index[0].normalize():
+                raise ValueError(f"{path}: not whole days or not starting at midnight")
 
         target = ts[self.gen_cols].to_numpy(dtype=np.float32, copy=False).T
         condition = ts[self.cond_cols].to_numpy(dtype=np.float32, copy=False).T
@@ -195,7 +198,7 @@ class SampleWindowDataset(h5Dataset):
 
 
 
-def draw_sampling_windows(split_df,strat_cols, n_runs, n_windows, window_steps, seed=42):
+def draw_sampling_windows(split_df,strat_cols, n_runs, n_windows, window_steps, seed=42, window_days=1):
     rng = np.random.default_rng(seed)
     # select run
     grps = split_df.groupby(strat_cols)
@@ -209,7 +212,8 @@ def draw_sampling_windows(split_df,strat_cols, n_runs, n_windows, window_steps, 
     rows = pd.concat(picked_rows)
 
     #select days
-    month_of_day = pd.DataFrame(pd.date_range("2026-01-01", periods=365).month, columns=["month"])
+    n_valid = 365 - window_days +1
+    month_of_day = pd.DataFrame(pd.date_range("2026-01-01", periods=n_valid).month, columns=["month"])
     output = []
     for _,r in rows.iterrows():
         day_windows = month_of_day.groupby(month_of_day["month"]).apply(lambda s: s.sample(1, random_state=int(rng.integers(1 << 31))))
@@ -218,7 +222,7 @@ def draw_sampling_windows(split_df,strat_cols, n_runs, n_windows, window_steps, 
         additional = n_windows - len(day_idx)
         # minimum of 12 Windows no matter the input param
         if additional > 0:
-            rest = np.setdiff1d(np.arange(365), day_idx)
+            rest = np.setdiff1d(np.arange(n_valid), day_idx)
             day_idx_new = rng.choice(rest, additional, replace=False)
             day_idx = np.concatenate([day_idx, day_idx_new])
         for d in np.sort(day_idx):

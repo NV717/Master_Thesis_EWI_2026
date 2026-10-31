@@ -41,10 +41,13 @@ class CondDropout:
     def apply(self, dyn, static_cat, static_cont, static_bool, keep):
         if dyn is not None and self.group_idx:
             out = dyn.clone()
+
             for g, idx in enumerate(self.group_idx):
                 out[:, idx] = out[:, idx] * keep["dyn"][:, g, None, None]
+
             flags = keep["dyn"][:, :, None].expand(-1, -1, dyn.shape[-1])
             dyn = torch.cat([out, flags], dim=1)
+
         static_cat = static_cat*keep["cat"].long()
         static_cont = static_cont * keep["cont"][:, None]
         static_bool = static_bool * keep["cont"][:, None]
