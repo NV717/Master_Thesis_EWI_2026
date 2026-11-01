@@ -224,7 +224,7 @@ def attention_ctrl_1d(type, dim):
     if type == "full":
         return Residual(PreNorm1d(dim, Attention1d(dim)))
     if type == "linear":
-        return Residual(PreNorm1d(dim, Attention1d(dim)))
+        return Residual(PreNorm1d(dim, LinearAttention1D(dim)))
     if type in ("none", None):
         return nn.Identity()
     raise ValueError("invalid attention type")
@@ -547,7 +547,7 @@ def compute_channel_minmax(dataloader, n_channels, key="target", channel_dim=1, 
     return lo.view(1, -1, 1), hi.view(1, -1, 1)
 
 @torch.inference_mode()
-def p_sample(model, x, t, t_index,schedule,static_cat, static_cont, static_bool, dyn=None,clip_range=True,
+def p_sample(model, x, t, t_index,schedule,static_cat, static_cont, static_bool, dyn=None,clip_range=None,
              cond=None, keep=None, scale=1.0):
     pred_noise = predict_noise(model, x, t, static_cat, static_cont, static_bool, dyn, cond, keep, scale)
 
@@ -620,7 +620,7 @@ def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
     shape = (batch_size, channels, sequence_length)
     if sampler == "dpm":
         return sample_dpm(model, shape, schedule, static_cat, static_cont, static_bool, dyn,
-                          num_steps, clip_range, cond, keep, scale)
+                          num_steps, clip_range, cond, keep, scale, progress=False)
     if sampler != "ddpm":
         raise ValueError(f"unknown sampler {sampler}")
     return p_sample_loop(
@@ -639,15 +639,15 @@ def sample1d(model, sequence_length, batch_size, channels, schedule, static_cat,
     )
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def sample_year(model, schedule, dyn_days, static_cat, static_cont, static_bool, context_steps, n_tgt, length,
-                reverse=True, clip_range=None, return_cond=True, return_ctx=False, **sample_kw):
+                reverse=True, clip_range=None, return_cond=True, return_ctx=False, init_ctx=None ,**sample_kw):
     device = next(model.parameters()).device
     static_cat = static_cat.to(device)
     static_cont = static_cont.to(device)
     static_bool= static_bool.to(device)
 
-    prev = None
+    prev = None if init_ctx is None else init_ctx.to(device)
     out = []
     conds = []
     ctxs = []

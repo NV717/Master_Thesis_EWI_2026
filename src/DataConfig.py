@@ -33,13 +33,18 @@ class DataConfig:
     cond_dropout: dict = field(default_factory=dict)
     cond_dropout_all: float = 0.0
     static_dropout: dict = field(default_factory=dict)
+    stats_cols: list = field(default_factory=list)
 
     @property
     def norm_by_col(self):
         return self.norm_variant[self.norm_method]
     @property
     def stat_calc_columns(self):
+        # fixed superset if given, else old behaviour
+        if self.stats_cols:
+            return self.stats_cols
         return self.target_cols + [c for c in self.dynamic_cond_cols if c not in self.target_cols]
+
     @property
     def steps_per_day(self):
         return stepsperday(self.resolution)
@@ -116,6 +121,7 @@ class DataConfig:
     @property
     def n_dyn_model_cols(self):
         return self.n_dyn_cond_cols + self.n_dyn_flags
+
 
 
 

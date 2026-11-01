@@ -311,9 +311,10 @@ def _run_info(run, ts, params, load_cols, total_persons, a_ref) -> dict:
     info.update({c: params[c] for c in PARAM_COLS if c in params.index})
     return info
 
-def _yearly_stats(load, occ, total_persons, a_ref) -> dict:
+def _yearly_stats(load, occ, total_persons, a_ref, freq="1min") -> dict:
     night = load[(load.index.hour >= 1) & (load.index.hour < 5)]
-    annual_energy = load.sum() * DT_HOURS
+    dt_hours = pd.Timedelta(freq) / pd.Timedelta("1h")
+    annual_energy = load.sum() * dt_hours
     n_days = load.index.normalize().nunique()
     res = {
         "sum_yearly": annual_energy,
@@ -335,15 +336,15 @@ def _yearly_stats(load, occ, total_persons, a_ref) -> dict:
     for label, series in {"": half, "_winter": half[winter], "_summer": half[~winter]}.items():
         res[f"tou{label}"], res[f"tou{label}_share"] = tou_parameter(series)
 
-    unocc = peaks_without_occupancy(load, occ, prominence=0.075, plat_min_abs=0.05)
+    unocc = peaks_without_occupancy(load, occ, freq=freq, prominence=0.075, plat_min_abs=0.05)
     res.update(unocc)
 
     return res
 
-def _daily_stats(load, offday) -> list[dict]:
+def _daily_stats(load, offday,freq="1min") -> list[dict]:
     g = load.groupby(load.index.date)
     d_max, d_mean = g.max(), g.mean()
-    pps = peak_plateau_ramp_stats(load)
+    pps = peak_plateau_ramp_stats(load, freq=freq)
     g_without_zero = load.where(load != 0).groupby(load.index.date)
     all_daily = {
         "max": d_max,

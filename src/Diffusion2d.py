@@ -162,7 +162,7 @@ def attention_ctrl_2d(type, dim):
     if type == "full":
         return Residual(PreNorm2d(dim, Attention2d(dim)))
     if type == "linear":
-        return Residual(PreNorm2d(dim, Attention2d(dim)))
+        return Residual(PreNorm2d(dim, LinearAttention2D(dim)))
     if type in ("none", None):
         return nn.Identity()
     raise ValueError("invalid attention type")

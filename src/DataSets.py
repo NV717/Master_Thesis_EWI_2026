@@ -338,6 +338,19 @@ def apply_scaler(x, scaler):
     x[log_mask] = np.log1p(np.maximum(x[log_mask], 0))
     return (x - center) / (scale + 1e-8)
 
+def scale_dynamic(cond_raw, norm , scaler, season):
+    cond = apply_scaler(cond_raw / norm, scaler)
+    if season is not None:
+        cond = np.concatenate([cond, season], axis=0)
+    return cond.astype(np.float32)
+
+def split_windows(cond, window_length):
+    run_length = cond.shape[1]
+    n_windows = math.ceil(run_length/window_length)
+    cond = np.pad(cond, ((0, 0), (0, n_windows * window_length - run_length)), mode="edge")
+    windows = [torch.from_numpy(np.ascontiguousarray(cond[:, w * window_length:(w + 1) * window_length])).unsqueeze(dim=0) for w in range(n_windows)]
+    return windows, run_length
+
 
 def invert_scaler(x, scaler, device=None):
     center, scale, log_mask = (t.to(x.device) for t in scaler)
@@ -367,24 +380,40 @@ def scaled_minmax(stats, columns, scaler):
 
     return f(raw_lo).view(1, -1, 1), f(raw_hi).view(1, -1, 1)
 
-def build_condition(preprocessor, train_df, params, batch_size, device="cpu"):
-    param_dict = {}
-    for col in preprocessor.static_cat_cols:
-        param_dict[col] = train_df[col].mode().iloc[0]
-    for col in preprocessor.static_cont_cols:
-        param_dict[col] = train_df[col].median()
-    for col in preprocessor.static_bool_cols:
-        param_dict[col] = bool(train_df[col].mode().iloc[0])
+def resolve_static(preprocessor, train_df, params, strict=True, optional=()):
+    cols = [*preprocessor.static_cat_cols, *preprocessor.static_cont_cols, *preprocessor.static_bool_cols]
+    unknown = [k for k in params if k not in cols]
+    if unknown:
+        raise KeyError(f"unknown static parameters: {unknown}")
+    missing = [c for c in cols if c not in params and c not in optional]
+    if strict and missing:
+        raise KeyError(f"missing static parameters: {missing}")
 
-    param_dict.update(params)
+    for c, cats in zip(preprocessor.static_cat_cols, preprocessor.cat_encoder.categories_):
+        if c in params and params[c] not in cats:
+            raise ValueError(f"{c}={params[c]!r} not in training categories {list(cats)}")
 
-    df = pd.DataFrame([param_dict] * batch_size)
-    out = preprocessor.transform(df)
+    row = {}
+    defaults = {}
+    defaults.update({c: train_df[c].mode().iloc[0] for c in preprocessor.static_cat_cols})
+    defaults.update({c: train_df[c].median() for c in preprocessor.static_cont_cols})
+    defaults.update({c: bool(train_df[c].mode().iloc[0]) for c in preprocessor.static_bool_cols})
 
-    return {
-        "static_cat": torch.from_numpy(out["categorical"]).long().to(device),
-        "static_cont": torch.from_numpy(out["continuous"]).float().to(device),
-        "static_bool": torch.from_numpy(out["boolean"]).float().to(device),
-    }
+    row = {c: defaults[c] for c in cols if not strict or c in optional}
+    row.update(params)
+    return row
+
+def static_tensors(preprocessor, row, batch_size, device="cpu"):
+    out = preprocessor.transform(pd.DataFrame([row] * batch_size))
+    return {"static_cat": torch.from_numpy(out["categorical"]).long().to(device),
+            "static_cont": torch.from_numpy(out["continuous"]).float().to(device),
+            "static_bool": torch.from_numpy(out["boolean"]).float().to(device)}
+
+def build_condition(preprocessor, train_df, params, batch_size, device="cpu", strict=False):
+    return static_tensors(preprocessor, resolve_static(preprocessor, train_df, params, strict), batch_size, device)
+
+
+
+
 
 

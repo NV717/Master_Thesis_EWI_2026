@@ -3,11 +3,14 @@ import hashlib
 import json
 from pathlib import Path
 import joblib
+import torch
+import pandas as pd
+import numpy as np
 from src.DataConfig import DataConfig
-from src.DataSets import PreprocessStaticCols, existing_filter, select_scalers, scaled_minmax, build_norm_factors, h5Dataset, SampleWindowDataset, normalizestatic, draw_sampling_windows,build_condition
+from src.Inference import  scale_dynamic, split_windows
+from src.DataSets import PreprocessStaticCols, existing_filter, select_scalers, apply_scaler, scaled_minmax, build_norm_factors, h5Dataset, SampleWindowDataset, normalizestatic, draw_sampling_windows,build_condition, resolve_static, season_channels, static_tensors
 from src.DataSplitting import split_manifests, load_precalc_stats, calc_scaler_stats, save_stats, make_unique_stat_file_name
 from torch.utils.data import DataLoader
-
 
 
 def make_splits(manifest, strat_cols,split_params):
@@ -96,6 +99,8 @@ class DataPipeline:
 
     @property
     def cat_cardinalities(self):
+        if not self.cfg.static_cat_cols:
+            return []
         return [len(cats) for cats in self.preprocessor.cat_encoder.categories_]
 
     def model_kwargs(self):
@@ -169,8 +174,84 @@ class DataPipeline:
             param_dict.update(persistent_workers=True,prefetch_factor=2, multiprocessing_context="spawn")
         return DataLoader(dataset, **param_dict)
 
-    def static_condition(self, params, batch_size, split="train", device="cpu"):
-        return build_condition(self.preprocessor, self.split_dfs[split], params, batch_size, device)
+    def static_condition(self, params, batch_size, split="train", device="cpu", strict=True):
+        return build_condition(self.preprocessor, self.split_dfs[split], params, batch_size, device, strict=strict)
+
+    def custom_condition(self, params, dynamic, n_samples=1, strict=True,drop=(),context=None, device="cpu"):
+        cfg = self.cfg
+        drop = tuple(drop)
+        unknown = set(drop) - set(cfg.cond_groups) - {"static_cat", "static_cont"}
+
+        if unknown:
+            raise ValueError(f"unknown groups {unknown}, allowed: {[*cfg.cond_groups, 'static_cat', 'static_cont']}")
+
+        dropped_cols = [c for g in drop if g in cfg.cond_groups and g != "season" for c in cfg.cond_groups[g]]
+        extra = set(dynamic.columns) - set(cfg.dynamic_cond_cols)
+        if extra:
+            raise ValueError(f"unknown dynamic columns {extra}")
+
+        missing = [c for c in cfg.dynamic_cond_cols if c not in dynamic and c not in dropped_cols]
+        if missing:
+            raise ValueError(f"dynamic is missing {missing} (or drop their group)")
+
+        dynamic = dynamic.reindex(columns=list(cfg.dynamic_cond_cols)).fillna({c: 0.0 for c in dropped_cols})
+        if dynamic.isna().any().any():
+            raise ValueError("dynamic contains NaN")
+
+        idx = dynamic.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            raise ValueError("dynamic needs a DatetimeIndex")
+        if not (idx.to_series().diff().dropna() == pd.Timedelta(cfg.resolution)).all():
+            raise ValueError(f"index must be regular at {cfg.resolution}")
+        if len(dynamic) % cfg.steps_per_day or idx[0] != idx[0].normalize():
+            raise ValueError("dynamic must cover whole days and start at midnight")
+
+        norm_keys = set(cfg.norm_by_col.values())
+        static_cols = [*self.preprocessor.static_cat_cols, *self.preprocessor.static_cont_cols, *self.preprocessor.static_bool_cols]
+        optional = [c for c in static_cols if c not in norm_keys
+                    and (("static_cat" in drop and c in self.preprocessor.static_cat_cols)
+                         or ("static_cont" in drop and c not in self.preprocessor.static_cat_cols))]
+
+        row = resolve_static(self.preprocessor, self.split_dfs["train"], params, strict, optional)
+        missing_norm = [k for k in norm_keys if k not in params]
+        if strict and missing_norm:
+                    raise KeyError(f"norm factors need {missing_norm} in params")
+        man = pd.DataFrame([{"run_id": "custom", **row}])
+        target_norm = build_norm_factors(man, cfg.target_cols, cfg.norm_by_col)["custom"]
+
+        init_ctx = None
+        if context is not None:
+            ctx_steps = cfg.context_steps
+            if ctx_steps <= 0:
+                raise ValueError("this model was trained without context")
+            if set(context.columns) != set(cfg.target_cols):
+                raise ValueError(f"context needs columns {cfg.target_cols}")
+            context = context[list(cfg.target_cols)]
+            step = pd.Timedelta(cfg.resolution)
+            if not (context.index.to_series().diff().dropna() == step).all():
+                raise ValueError(f"context index must be regular at {cfg.resolution}")
+            if context.index[-1] + step != idx[0]:
+                raise ValueError("context must end exactly one step before dynamic starts")
+            if len(context) < ctx_steps:
+                raise ValueError(f"context needs at least {ctx_steps} steps, got {len(context)}")
+            context = context.iloc[-ctx_steps:]
+            if context.isna().any().any():
+                raise ValueError("context contains NaN")
+
+            ctx = apply_scaler(context.to_numpy(np.float32).T / target_norm, self.target_scaler)
+            init_ctx = torch.from_numpy(ctx.astype(np.float32)).unsqueeze(dim=0).repeat(n_samples, 1, 1).to(device)
+
+        condition_norm = build_norm_factors(man, cfg.dynamic_cond_cols, cfg.norm_by_col)["custom"]
+
+        season = season_channels(idx) if cfg.use_season else None
+        cond = scale_dynamic(dynamic.to_numpy(np.float32).T, condition_norm, self.condition_scaler, season)
+        windows, n_steps = split_windows(cond, cfg.window_length)
+
+        return dict(**static_tensors(self.preprocessor, row, n_samples, device),
+                    windows=windows, n_steps=n_steps, index=idx, dynamic=dynamic,init_ctx=init_ctx,
+                    target_norm=target_norm, condition_norm=condition_norm, row=row,
+                    keep={g: False for g in drop})
+
 
 def split_condition(self, cond):
     n = len(self.cfg.dynamic_cond_cols)
@@ -178,3 +259,4 @@ def split_condition(self, cond):
     return dict(dynamic=cond[:, :n], season=cond[:, n:n + season] if season else None,
                 context=cond[:, n + season:-1] if self.cfg.context_steps else None,
                 mask=cond[:, -1] if self.cfg.context_steps else None)
+
