@@ -13,7 +13,7 @@ test_path = r"Generation/Generation/run_000013.h5"
 MANIFEST_PATH = r"DataPreparation/Generation/manifest.parquet"
 
 def get_realized_manifest(results_dir: Path):
-    completed_runs = results_dir.glob("run_*.h5")
+    completed_runs = results_dir.glob("*_run_*.h5")
     dfs = [pd.read_hdf(run, key="params") for run in tqdm(completed_runs)]
     realised_manifest = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
     realised_manifest = realised_manifest.sort_values(by=["seed"]).reset_index(drop=True)
@@ -516,7 +516,7 @@ def process_run_cached(run: Path, cache_dir, correlations: bool = True) -> dict:
 
 def check_timeseries(resultsdir, n_jobs=-1, cache_dir=None, correlations=False) -> dict[str, pd.DataFrame]:
     resultsdir = Path(resultsdir)
-    completed_runs = sorted(resultsdir.glob("run_*.h5"))
+    completed_runs = sorted(resultsdir.glob("*_run_*.h5"))
     if cache_dir is not None:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
 

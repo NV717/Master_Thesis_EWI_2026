@@ -10,6 +10,31 @@ import shutil
 import hashlib, json
 
 
+SPLIT_NAMES = ("train", "val", "test", "holdout_building", "holdout_year", "holdout_station")
+
+def load_split_manifests(paths):
+    out = {}
+    for name, p in paths.items():
+        p = Path(p)
+        df = pd.read_csv(p) if p.suffix == ".csv" else pd.read_parquet(p)
+        out[name] = df.reset_index(drop=True)
+    return validate_split_manifests(out)
+
+def validate_split_manifests(split_dfs):
+    missing = {"train", "val", "test"} - set(split_dfs)
+    assert not missing, f"missing required splits: {missing}"
+    unknown = set(split_dfs) - set(SPLIT_NAMES)
+    assert not unknown, f"unknown split names: {unknown}"
+    all_runs = pd.concat([d["run_id"] for d in split_dfs.values()])
+    assert not all_runs.duplicated().any(), "run_ids occur in more than one split"
+    b = {n: set(split_dfs[n]["building_id"]) for n in ("train", "val", "test")}
+    for a, c in (("train", "val"), ("train", "test"), ("val", "test")):
+        assert not (b[a] & b[c]), f"{len(b[a] & b[c])} buildings in both {a} and {c}"
+
+    for n, d in split_dfs.items():
+        print(f"{n}: {len(d)} rows, {d['building_id'].nunique()} buildings")
+    return split_dfs
+
 
 def datasplit(X,Y, fractions, seed=None):
     assert abs(sum(fractions) - 1.0) < 1e-6
@@ -89,7 +114,7 @@ def check_distr(split_dfs,cont_cols, cat_cols, row_cols):
         print(summary.round(2))
         # KS test
         for type, df in building_dfs.items():
-            if type in ["holdout_building","holdout_year","holdout_both"]:
+            if type in ["holdout_building","holdout_year","holdout_station"]:
                 continue
             stat, p = ks_2samp(orig_buildings[col], df[col])
             print(f"{type}: stat={stat:.4f}, p={p:.4f}")
@@ -98,7 +123,7 @@ def check_distr(split_dfs,cont_cols, cat_cols, row_cols):
 
     for ax, col in zip(axes[0], cont_cols):
         for type, df in building_dfs.items():
-            if type in ["holdout_building","holdout_year","holdout_both"]:
+            if type in ["holdout_building","holdout_year","holdout_station"]:
                 continue
             ax.hist(df[col], bins=30, density=True, histtype='step', label=type)
         ax.set_title(col)

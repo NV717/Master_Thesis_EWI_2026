@@ -9,14 +9,19 @@ import numpy as np
 from src.DataConfig import DataConfig
 from src.Inference import  scale_dynamic, split_windows
 from src.DataSets import PreprocessStaticCols, existing_filter, select_scalers, apply_scaler, scaled_minmax, build_norm_factors, h5Dataset, SampleWindowDataset, normalizestatic, draw_sampling_windows,build_condition, resolve_static, season_channels, static_tensors
-from src.DataSplitting import split_manifests, load_precalc_stats, calc_scaler_stats, save_stats, make_unique_stat_file_name
+from src.DataSplitting import load_split_manifests, validate_split_manifests, load_precalc_stats, calc_scaler_stats, save_stats, make_unique_stat_file_name
 from torch.utils.data import DataLoader
 
 
-def make_splits(manifest, strat_cols,split_params):
-    out = split_manifests(manifest, strat_cols,**split_params)
-    return {"train": out[7], "val": out[8], "test": out[9],
-            "holdout_building": out[11], "holdout_year": out[12], "holdout_both": out[13]}
+# def make_splits(manifest, strat_cols,split_params):
+#     out = split_manifests(manifest, strat_cols,**split_params)
+#     return {"train": out[7], "val": out[8], "test": out[9],
+#             "holdout_building": out[11], "holdout_year": out[12], "holdout_both": out[13]}
+
+def make_splits(manifests):
+    if all(isinstance(v, pd.DataFrame) for v in manifests.values()):
+        return validate_split_manifests(dict(manifests))
+    return load_split_manifests(manifests)
 
 def add_share_cols(train_df, prefix="apl_"):
     cols = [c for c in train_df.columns if c.startswith(prefix) and train_df[c].std() > 0]
@@ -38,8 +43,10 @@ class DataPipeline:
         self.condition_scaler = select_scalers(stats, cfg.dynamic_cond_cols, scaler_by_col=cfg.scaler_by_col, zero_cols=cfg.zero_cols)
 
     @classmethod
-    def build(cls, cfg, manifest, compute_stats_if_missing=False):
-        full= make_splits(manifest, cfg.strat_cols, cfg.split_params)
+    def build(cls, cfg
+              , manifests, compute_stats_if_missing=False):
+
+        full = make_splits(manifests)
         h = hash_checker(full)
         filtered = {}
         missing = {}
@@ -81,7 +88,7 @@ class DataPipeline:
         print(f"saved data pipeline (split {self.split_hash}) to {path}")
 
     @classmethod
-    def load_files(cls, path, manifest, split_dirs=None, stats_dir=None):
+    def load_files(cls, path, manifests, split_dirs=None, stats_dir=None):
         path = Path(path)
         cfg = DataConfig.load(path / "data_config.json")
         if split_dirs:
@@ -89,7 +96,7 @@ class DataPipeline:
         if stats_dir:
             cfg.stats_dir = str(stats_dir)
         meta = json.loads((path / "meta.json").read_text())
-        full = make_splits(manifest, cfg.strat_cols, cfg.split_params)
+        full = make_splits(manifests)
 
         if hash_checker(full) != meta["split_hash"]:
             raise ValueError(f"recomputed split {hash_checker(full)} != stored {meta['split_hash']}")
