@@ -16,7 +16,7 @@ def load_split_manifests(paths):
     out = {}
     for name, p in paths.items():
         p = Path(p)
-        df = pd.read_csv(p) if p.suffix == ".csv" else pd.read_parquet(p)
+        df = pd.read_csv(p, index_col=0) if p.suffix == ".csv" else pd.read_parquet(p)
         out[name] = df.reset_index(drop=True)
     return validate_split_manifests(out)
 

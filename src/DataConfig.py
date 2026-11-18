@@ -26,7 +26,6 @@ class DataConfig:
     context_noise: float = 0.0
     buffer_size: int = 4096
     strat_cols: list = field(default_factory=lambda: ["buildingType", "buildingAgeBin"])
-    split_params: dict = field(default_factory=dict)
     split_dirs: dict = field(default_factory=dict)
     stats_dir: str = "../data/stats/scalerstats"
     cond_groups: dict = field(default_factory=dict)
