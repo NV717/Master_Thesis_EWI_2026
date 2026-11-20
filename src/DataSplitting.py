@@ -126,7 +126,13 @@ def split_manifests(manifest, strat_cols,holdout_type="TH", holdout_age="DE.05",
 def check_distr(split_dfs,cont_cols, cat_cols, row_cols):
     building_dfs = {n: d.drop_duplicates("building_id") for n, d in split_dfs.items()}
     POOL = ("train", "val", "test")
+    HOLDOUTS = ("holdout_building", "holdout_year", "holdout_station")
     orig_buildings = pd.concat([building_dfs[n] for n in POOL])
+
+    def annotate(ax, lines):
+        ax.text(0.98, 0.98, "\n".join(lines), transform=ax.transAxes, ha="right", va="top",
+                fontsize=9, family="monospace",bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+
 
     for col in cont_cols:
         print(f"___{col}___")
@@ -136,25 +142,26 @@ def check_distr(split_dfs,cont_cols, cat_cols, row_cols):
 
         })
         print(summary.round(2))
-        # KS test
-        for type, df in building_dfs.items():
-            if type in ["holdout_building","holdout_year","holdout_station"]:
-                continue
-            stat, p = ks_2samp(orig_buildings[col], df[col])
-            print(f"{type}: stat={stat:.4f}, p={p:.4f}")
 
-    fig, axes = plt.subplots(1, len(cont_cols), figsize=(6 * len(cont_cols), 4),squeeze=False)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ks_lines = []
 
-    for ax, col in zip(axes[0], cont_cols):
-        for type, df in building_dfs.items():
-            if type in ["holdout_building","holdout_year","holdout_station"]:
+        for name, df in building_dfs.items():
+
+            if name in HOLDOUTS:
                 continue
-            ax.hist(df[col], bins=30, density=True, histtype='step', label=type)
+            stat, p = ks_2samp(orig_buildings[col], df[col])  # KS vs. pooled original
+            print(f"{name}: stat={stat:.4f}, p={p:.4f}")
+            ks_lines.append(f"KS {name:<5} p={p:.3f}")
+            ax.hist(df[col], bins=30, density=True, histtype="step", label=name)
         ax.set_title(col)
-        ax.legend()
+        ax.legend(loc="upper left")
+        annotate(ax, ks_lines)
+        plt.tight_layout()
+        plt.show()
 
-    plt.tight_layout()
-    plt.show()
+
+    cat_props = {}
     for col in cat_cols:
         print(f"___{col}___")
         summary = pd.DataFrame({
@@ -162,21 +169,44 @@ def check_distr(split_dfs,cont_cols, cat_cols, row_cols):
             **{name: df[col].value_counts(normalize=True) for name, df in building_dfs.items()}
         })
         print(summary.round(2))
+        cat_props[col] = summary[["original", *POOL]].fillna(0)
 
-        conting_tab = pd.DataFrame({
-            "train": building_dfs["train"][col].value_counts().fillna(0),
-            "val": building_dfs["val"][col].value_counts().fillna(0),
-            "test": building_dfs["test"][col].value_counts().fillna(0),
-        })
+        conting_tab = pd.DataFrame({n: building_dfs[n][col].value_counts() for n in POOL}).fillna(0)
 
         chi2, p, dof, _ = chi2_contingency(conting_tab)
         print(f"Chi2={chi2:.4f}, p={p:.4f}, dof={dof}")
 
-    for col in row_cols:  # e.g. "year": counted per row, not per building
+        fig, ax = plt.subplots(figsize=(6, 4))
+        tab = summary[["original", *POOL]].fillna(0).sort_index()
+        tab.columns = [f"{c} (n={len(orig_buildings) if c == 'original' else len(building_dfs[c])})"for c in tab.columns]
+        tab.plot.bar(ax=ax, width=0.8)
+        ax.set_title(col)
+        ax.set_ylabel("share")
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", rotation=45)
+        annotate(ax, [f"chi2 p={p:.3f} (dof={dof})"])
+        plt.tight_layout()
+        plt.show()
+
+    row_props = {}
+    for col in row_cols:
         print(f"___{col} (rows)___")
-        print(pd.DataFrame({n: d[col].value_counts(normalize=True) for n, d in split_dfs.items()}).round(3))
-        chi2, p, dof, _ = chi2_contingency(pd.DataFrame({n: split_dfs[n][col].value_counts() for n in POOL}))
+
+        summary = pd.DataFrame({n: d[col].value_counts(normalize=True) for n, d in split_dfs.items()})
+        print(summary.round(3))
+        chi2, p, dof, _ = chi2_contingency(pd.DataFrame({n: split_dfs[n][col].value_counts() for n in POOL}).fillna(0))
+        row_props[col] = summary[list(POOL)].fillna(0)
         print(f"Chi2={chi2:.4f}, p={p:.4f}, dof={dof}")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        summary[list(POOL)].fillna(0).sort_index().plot.bar(ax=ax, width=0.8)
+        ax.set_title(f"{col} (rows)")
+        ax.set_ylabel("share")
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", rotation=45)
+        annotate(ax, [f"chi2 p={p:.3f} (dof={dof})"])
+        plt.tight_layout()
+        plt.show()
 
 
 
