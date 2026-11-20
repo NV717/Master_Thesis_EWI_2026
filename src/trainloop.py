@@ -23,6 +23,7 @@ def build_optimizer(model, cfg):
     return Adam(model.parameters(), **cfg)
 
 def build_ema(model, cfg):
+
     return EMA(model, **cfg)
 
 def train(model, schedule, dataloader, optimizer, ema, device, *,
@@ -37,6 +38,7 @@ def train(model, schedule, dataloader, optimizer, ema, device, *,
     epoch_losses = []
 
     def run_validation(epoch, global_step):
+
         val_loss, val_per_t = validate(ema.ema_model, schedule, val_dataloader, device,
                                        loss_type=loss_type, n_batches=val_batches,cond=cond)
         print(f"step {global_step}: val_loss_ema={val_loss:.4f}")

@@ -8,17 +8,20 @@ from skmultilearn.model_selection import IterativeStratification
 from scipy.stats import ks_2samp, chi2_contingency
 import shutil
 import hashlib, json
+import os
 
 
 SPLIT_NAMES = ("train", "val", "test", "holdout_building", "holdout_year", "holdout_station")
 
-def load_split_manifests(paths):
+def load_split_manifests(paths, validate=True):
     out = {}
     for name, p in paths.items():
         p = Path(p)
         df = pd.read_csv(p, index_col=0) if p.suffix == ".csv" else pd.read_parquet(p)
         out[name] = df.reset_index(drop=True)
-    return validate_split_manifests(out)
+    if validate:
+        return validate_split_manifests(out)
+    return out
 
 def validate_split_manifests(split_dfs):
     missing = {"train", "val", "test"} - set(split_dfs)
@@ -31,9 +34,30 @@ def validate_split_manifests(split_dfs):
     for a, c in (("train", "val"), ("train", "test"), ("val", "test")):
         assert not (b[a] & b[c]), f"{len(b[a] & b[c])} buildings in both {a} and {c}"
 
+    holdout_stations = split_dfs["holdout_station"]["weatherFilepath"].str.extract(r"TRY20\d\d_(\d+)_")[0]
+    for k, man in split_dfs.items():
+        if k != "holdout_station":
+            man["station"] = man["weatherFilepath"].str.extract(r"TRY20\d\d_(\d+)_")[0]
+            leaks = man[man["station"].isin(holdout_stations)]
+            assert leaks.empty, "holdout stations found split"
+        req_cols = {"weatherFilepath", "appliances", "weather_seed", "app_ownership_seed"}
+
+        assert not (req_cols - set(man.columns)), "manifest lacks req cols"
+
+        n_weather = man.groupby("weather_seed")["weatherFilepath"].nunique()
+        assert not (n_weather > 1).any(), "differing weatherfile despite same seed"
+
+        n_apliances = man.groupby("app_ownership_seed")["appliances"].nunique()
+        assert not (n_apliances > 1).any(), "differing appliances despite same seed"
+
+
+
+
     for n, d in split_dfs.items():
         print(f"{n}: {len(d)} rows, {d['building_id'].nunique()} buildings")
     return split_dfs
+
+
 
 
 def datasplit(X,Y, fractions, seed=None):
